@@ -22,12 +22,14 @@ test('urgency changes the recommendation', () => {
   assert.match(low, /normal queue/)
 })
 
-test('high urgency always escalates, and billing escalates at medium', () => {
+test('high urgency escalates, and nothing below High does', () => {
   for (const category of ['Billing Issue', 'Technical Problem', 'Feature Request', 'General Inquiry']) {
     assert.match(getRecommendedAction(category, 'High'), /Escalate/, `${category} High`)
+    // Regression: Medium billing used to escalate, which paged a senior agent
+    // for routine requests like changing the card on file.
+    assert.doesNotMatch(getRecommendedAction(category, 'Medium'), /Escalate/, `${category} Medium`)
+    assert.doesNotMatch(getRecommendedAction(category, 'Low'), /Escalate/, `${category} Low`)
   }
-  assert.match(getRecommendedAction('Billing Issue', 'Medium'), /Escalate/)
-  assert.doesNotMatch(getRecommendedAction('Feature Request', 'Medium'), /Escalate/)
 })
 
 test('unknown categories fall back to manual review', () => {

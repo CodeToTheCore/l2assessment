@@ -19,14 +19,16 @@ const urgencyGuidance = {
 /**
  * Determines if a message should be escalated to a senior agent.
  *
- * @param {string} category - The message category
+ * Urgency already carries the impact judgment, so it is the only trigger. An
+ * earlier version also escalated every Medium billing message, which paged a
+ * senior agent for routine work like "I need to change the card on file before
+ * the next renewal".
+ *
  * @param {string} urgency - The urgency level
  * @returns {boolean} - Whether to escalate
  */
-function shouldEscalate(category, urgency) {
-  if (urgency === 'High') return true
-  // Billing problems have direct revenue impact, so escalate sooner.
-  return category === 'Billing Issue' && urgency === 'Medium'
+function shouldEscalate(urgency) {
+  return urgency === 'High'
 }
 
 /**
@@ -38,7 +40,7 @@ function shouldEscalate(category, urgency) {
  */
 export function getRecommendedAction(category, urgency) {
   const action = actionTemplates[category] || actionTemplates.Unknown
-  const guidance = shouldEscalate(category, urgency)
+  const guidance = shouldEscalate(urgency)
     ? urgencyGuidance.High
     : urgencyGuidance[urgency]
 

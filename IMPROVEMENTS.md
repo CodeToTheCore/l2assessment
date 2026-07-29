@@ -15,11 +15,14 @@ the original `urgencyScorer.js` and `templates.js` straight from git alongside t
 versions, so every claim below is a diff between two runnable implementations.
 
 **The first thing testing surfaced had nothing to do with the code:** the bundled Groq
-API key is expired (the API returns `expired_api_key`). Every request was failing and
+API key was expired (the API returned `expired_api_key`). Every request was failing and
 the app was silently serving canned rule-based output — still labelled "AI Reasoning"
 in the UI. I had been "testing the LLM" for a while before I noticed. That single
 observation shaped the whole review: a triage tool that cannot tell you it has stopped
 thinking is the most expensive kind of broken.
+
+I replaced the key and re-ran everything against the live API afterwards, so the results
+in section 4 cover all three paths: live model, no key, and invalid key.
 
 ---
 
@@ -110,9 +113,14 @@ in one structured call, with the urgency criteria written in terms of impact and
 explicit instruction to ignore tone:
 
 > Urgency rules — judge business impact, not tone. A polite message can be High and an
-> angry message can be Low. **High**: the customer is blocked or cannot work, money or
-> data is at risk, a security or account-access problem, an explicit deadline, or a hint
-> that they may cancel or switch to a competitor. …
+> angry message can be Low. Most messages are Medium or Low; High is reserved for genuine
+> emergencies, because over-escalating buries the real ones. **High**: the customer cannot
+> work at all, money or data is actively at risk, they have lost account access, there is
+> a security problem, they state a deadline, or they hint at cancelling or switching to a
+> competitor. …
+
+(The "most messages are Medium or Low" calibration came out of the live run — see
+section 4.)
 
 This costs nothing extra: same request, same latency, one more JSON field. The rewritten
 keyword scorer stays in place as the fallback for when the API is unavailable, which is
@@ -136,8 +144,10 @@ When no key is configured the app skips the request entirely instead of failing 
 Fallback wording is now chosen by a stable hash of the message, so it is reproducible.
 
 **Recommendations that use both inputs.** Every category has its own action, and
-`urgency` now drives a response-time line via a `shouldEscalate` rule (High always
-escalates; Billing escalates from Medium, since it is revenue-impacting).
+`urgency` now drives a response-time line via a `shouldEscalate` rule — High escalates,
+everything below it goes to the normal queue or a one-business-day response. (An earlier
+version of this rule also escalated Medium billing messages; the live run showed why
+that was wrong — see below.)
 
 **Data layer.** A new [`storage.js`](src/utils/storage.js) is the single guarded
 read/write path: corrupt or legacy entries are filtered out instead of throwing, history
@@ -192,7 +202,7 @@ as "the fallback got much better", not "urgency is solved".
 | Input | Before | After |
 |---|---|---|
 | `Feature Request` / Low | Ask user to check billing portal. | Handle in the normal queue. Log the request in the product backlog and let the customer know it was recorded. |
-| `Billing Issue` / Medium | Ask user to check billing portal. | Escalate to a senior agent and respond within 1 hour. Verify the charge in the billing portal, then confirm the customer's payment method and invoice history. |
+| `Billing Issue` / Medium | Ask user to check billing portal. | Respond within one business day. Verify the charge in the billing portal, then confirm the customer's payment method and invoice history. |
 | `Technical Problem` / High | Suggest user to restart their browser. | Escalate to a senior agent and respond within 1 hour. Try to reproduce the issue, then collect browser/OS details and any error messages before handing to engineering. |
 
 ### Automated checks
@@ -205,7 +215,71 @@ npm run build → clean
 
 ### Live LLM verification
 
-<!-- LIVE-RESULTS -->
+Run against the live Groq API with a working key, calling the real `triageMessage`
+from a script so the code under test is the code the app runs.
+
+**Categories — 6/6 on the README examples.**
+
+| Message | Category | Urgency | Expected urgency |
+|---|---|---|---|
+| Our production server is down | Technical Problem | High | High |
+| Hi there! … thank you for your amazing customer service … | General Inquiry | Low | Low |
+| I would love to see a dark mode option … | Feature Request | Low | Low |
+| I tried to update my payment method but the page keeps loading forever | Technical Problem | Medium | Medium |
+| Can I upgrade my subscription to the pro plan? | Billing Issue | Low | Low |
+| The dashboard won't load … it keeps timing out | Technical Problem | **High** | Medium |
+
+The last row is the only disagreement, and I think the model has the better argument:
+if the dashboard never loads, the customer genuinely cannot work.
+
+**Urgency on the held-out set — 8/8, against 2/8 for the keyword rules.** Same eight
+messages the rewritten keyword scorer failed; the categories it assigned alongside them
+were all correct too.
+
+| Expected | LLM | Category | Message |
+|---|---|---|---|
+| High | High | Technical Problem | Our customers are getting 500 errors on checkout right now, revenue is stopped |
+| High | High | Technical Problem | Someone else logged into our admin panel, we think our account was compromised |
+| Medium | Medium | Technical Problem | The export to CSV button does nothing when I click it |
+| Medium | Medium | Billing Issue | I need to change the credit card on file before the next renewal |
+| Low | Low | General Inquiry | Do you have documentation on your API rate limits? |
+| Low | Low | General Inquiry | Just checking in on the roadmap for Q4, no rush |
+| Medium | Medium | Technical Problem | Reports have been taking about 30 seconds to generate since yesterday |
+| High | High | Technical Problem | We are evaluating competitors because this keeps failing and our deadline is Friday |
+
+**Determinism.** The same message triaged three times returned Technical Problem / High
+every time, as expected at `temperature: 0`.
+
+**Fallback paths.** With no key configured, triage returns
+`source=fallback urgencySource=rules` and never issues a request. With an invalid key it
+returns the same, carrying the 401 through as `error`. Both surface in the UI as the
+amber banner and the *rule-scored* badge.
+
+#### What the live run changed
+
+The first live run exposed a bias the unit tests could not: the model **over-escalated**.
+Four of its five urgency disagreements were rated higher than my own labels, and the
+worst interaction was mine, not the model's — *"Can I upgrade my subscription to the pro
+plan?"* came back Billing/Medium, and my own `shouldEscalate` rule ("billing is
+revenue-impacting, escalate from Medium") turned a sales upsell into *"Escalate to a
+senior agent and respond within 1 hour."*
+
+Two fixes followed, in two calibration passes:
+
+1. **Prompt calibration.** Stated that High is reserved and most messages are Medium or
+   Low, and that one broken feature with the rest of the product working is Medium.
+   Held-out urgency went 7/8 → 8/8. This pass regressed a category (the upgrade question
+   became General Inquiry) because urgency guidance about "questions about plans and
+   pricing" leaked into category selection — fixed by separating the two explicitly in
+   the prompt: category describes the topic, urgency describes the impact.
+2. **Dropped the Medium-billing escalation rule.** Urgency already carries the impact
+   judgment, so applying a category rule on top double-counted it. High is now the only
+   escalation trigger, with a regression test.
+
+I stopped at two passes deliberately. With only fourteen messages, more iterations would
+be fitting the prompt to this sample — the same mistake as the keyword list, just at a
+higher level. Getting past that needs the labelled evaluation set in section 5, not more
+tuning against my own examples.
 
 ---
 

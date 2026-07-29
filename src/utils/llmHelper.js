@@ -15,8 +15,11 @@ export const CATEGORIES = [
 
 export const URGENCY_LEVELS = ['High', 'Medium', 'Low'];
 
-// Optional chaining so this module can also be imported outside Vite (tests).
-const API_KEY = import.meta.env?.VITE_GROQ_API_KEY;
+// Vite injects import.meta.env in the browser build. The process.env fallback lets
+// this module also run under plain Node, so the triage logic can be exercised by
+// tests and offline evaluation scripts without duplicating it.
+const API_KEY =
+  import.meta.env?.VITE_GROQ_API_KEY ?? globalThis.process?.env?.VITE_GROQ_API_KEY;
 
 // Only construct the client when a key is configured; otherwise we go straight
 // to the rule-based fallback instead of making a request that must fail.
@@ -32,19 +35,29 @@ const SYSTEM_PROMPT = `You triage customer support messages for a support team.
 Reply with a single JSON object and nothing else, in this exact shape:
 {"category": "<one of: ${CATEGORIES.join(' | ')}>", "urgency": "<one of: ${URGENCY_LEVELS.join(' | ')}>", "reasoning": "<1-2 sentences explaining both choices>"}
 
-Category rules:
+Category rules - the category describes the TOPIC, independently of how urgent it is:
 - "category" must be copied verbatim from the list above.
-- Choose "General Inquiry" when the message is a question, feedback, or does not fit the other categories.
+- Choose "Billing Issue" for anything about plans, pricing, upgrades, invoices,
+  charges, refunds, subscriptions or payment methods, even when it is only a question.
+- Choose "Technical Problem" when something in the product is not working correctly.
+- Choose "Feature Request" when the customer is asking for functionality that does not exist.
+- Choose "General Inquiry" for other questions, feedback, and praise.
 
 Urgency rules - judge business impact, not tone. A polite message can be High
-and an angry message can be Low:
-- "High": the customer is blocked or cannot work, money or data is at risk,
-  a security or account-access problem, an explicit deadline, or a hint that
-  they may cancel or switch to a competitor.
-- "Medium": a real problem that has a workaround or is not blocking work, and
-  billing changes that are not urgent.
-- "Low": questions, documentation requests, feature ideas, praise, and anything
-  with no time pressure.
+and an angry message can be Low. Most messages are Medium or Low; High is
+reserved for genuine emergencies, because over-escalating buries the real ones:
+- "High": the customer cannot work at all, money or data is actively at risk,
+  they have lost account access, there is a security problem, they state a
+  deadline, or they hint at cancelling or switching to a competitor.
+- "Medium": a real problem where the customer can still use the rest of the
+  product, or where an obvious workaround exists - one broken button, page or
+  report, something slow, or a billing change they need made.
+- "Low": questions about plans, pricing, upgrades, documentation or roadmap;
+  feature ideas; praise; anything with no stated time pressure.
+
+If one feature is broken but the rest of the product still works, that is
+Medium, not High. A question about upgrading or being charged is Low or Medium
+unless the customer says they are blocked or names a deadline.
 
 Do not include markdown, code fences, or any text outside the JSON object.`;
 
