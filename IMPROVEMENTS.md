@@ -250,6 +250,33 @@ were all correct too.
 **Determinism.** The same message triaged three times returned Technical Problem / High
 every time, as expected at `temperature: 0`.
 
+One caveat I should state rather than imply: `temperature: 0` makes sampling greedy, it
+does not *guarantee* bit-identical output. Batching and hardware differences on the
+provider side can still cause drift. Three repeat calls on one message is evidence, not
+proof — a real stability claim needs repeat calls across the whole set, tracked over time.
+That belongs with the evaluation harness in section 5, and it is the reason the allow-list
+validation matters: it bounds what a drifting reply can turn into, even if the wording
+moves.
+
+**Category/urgency correlation.** Putting both fields in one call risks the model
+correlating them — assuming Billing means Low, or Technical means High. I tested this
+adversarially with pairs built to cut against the stereotype, and the fear did not
+materialise: **urgency 6/6**.
+
+| Message | Category | Urgency |
+|---|---|---|
+| Your billing system charged our whole company 400 times overnight and our card is now frozen | Billing Issue | **High** |
+| We were downgraded to the free tier by mistake and all 60 of our staff are locked out | Billing Issue | **High** |
+| Our invoice shows a competitor company name and their bank details. Is our billing data leaking? | Billing Issue | **High** |
+| Tiny thing, no rush at all: the footer copyright year still says 2024 | Technical Problem | **Low** |
+| We need SSO enabled today or our security team shuts off access at 5pm | Technical Problem* | **High** |
+| Quick question, who do I notify that we are cancelling all 3 accounts on Friday? | Billing Issue* | **High** |
+
+Categories scored 4/6, and both starred disagreements are arguable rather than wrong. The
+last one is **my** label being wrong: I expected General Inquiry, but my own prompt rule
+says subscriptions are billing, so the model followed the instruction I gave it more
+faithfully than I did.
+
 **Fallback paths.** With no key configured, triage returns
 `source=fallback urgencySource=rules` and never issues a request. With an invalid key it
 returns the same, carrying the 401 through as `error`. Both surface in the UI as the
@@ -401,8 +428,81 @@ a reply through because a value was unexpected.
 
 ### Testing
 
-Test count went from 22 to **53**. The new ones cover the follow-up state machine
+Test count went from 22 to **76**. The new ones cover the follow-up state machine
 (including the boundary where a deadline is exactly reached, and a corrupt timestamp not
 producing a false "overdue"), supervisor detection including the negative cases, the
-supervisor escalation path in the templates, and the review parser's fail-safe behaviour.
-Both features were also verified against the live API and against the no-key path.
+escalation precedence table, aggravation signals, and the review parser's fail-safe
+behaviour. Everything was also verified against the live API and against the no-key path.
+
+---
+
+## 7. Separating tone from impact from routing
+
+Reviewing the write-up surfaced a design inconsistency worth fixing. The LLM prompt says
+"judge business impact, not tone" — but the rule-based fallback scorer was still adding
+points for shouting and subtracting them for politeness. Urgency was tone-free in one path
+and tone-influenced in the other, which is exactly the kind of quiet disagreement between
+two code paths that becomes a bug later.
+
+The fix was to make tone its own layer, so each module answers one question:
+
+| Layer | Module | Question | Uses the LLM? |
+|---|---|---|---|
+| 1. Classification | [`llmHelper.js`](src/utils/llmHelper.js) | What is this about, how much impact, did they ask for a manager? | Yes |
+| 2. Tone | [`aggravation.js`](src/utils/aggravation.js) | How badly is this relationship going? | No |
+| 3. Routing | [`escalation.js`](src/utils/escalation.js) | Does a supervisor need to see this, and why? | No |
+
+`detectAggravation(message)` returns `{aggravated, signals}` — the signals array matters as
+much as the boolean, because it records *why*, which makes the behaviour debuggable and the
+tests specific rather than asserting a bare `true`.
+
+It is a hard-coded phrase list with plain counting, no weighted stacking. That is a direct
+lesson from the original scorer, whose worst bug came from stacked weighted branches nobody
+could reason about. One deliberate rule: **tone signals alone never set `aggravated`**.
+Shouting and punctuation are reported but not decisive, because "THANKS SO MUCH!!!" is
+emphatic, not angry — and a flag that fires on exclamation marks stops meaning anything.
+
+`decideEscalation({category, urgency, aggravated, customerRequestedSupervisor})` returns
+`{escalate, reason}` with an **allow-listed reason enum** rather than free text, for the
+same reason categories are allow-listed: it can be stored, counted and asserted on, and it
+cannot drift into prose. It is pure and total — it never sees the raw message and never
+calls the LLM, so it tests as enum combinations in, enum out. Precedence:
+
+1. `customer_requested` — wins at any urgency
+2. `high_urgency_and_aggravated`
+3. `high_urgency` — High escalates on its own, so a polite outage is not deprioritised
+4. `none` — **aggravation alone does not escalate**
+
+That last point is the one I would defend hardest. Being upset is not the same as being
+blocked. Letting tone drive routing is the original scorer's mistake wearing a different
+hat: it rewards whoever shouts loudest and buries the calm customer whose business has
+stopped. Aggravation changes *how you open the reply*, not *where the message goes* — which
+is why the High-and-aggravated action says "acknowledge that first".
+
+`category` is accepted in the input shape but does not affect the decision, and the
+docstring says why: escalating Medium billing was the over-escalation bug from section 4.
+
+`getRecommendedAction` now consumes `decideEscalation` instead of re-deriving it, so
+routing lives in one place and the templates module is responsible only for wording.
+
+**Live verification of the layer separation:**
+
+| Message | L1 classify | L2 tone | L3 route |
+|---|---|---|---|
+| Our production server is down and we cannot process orders | Technical / **High** | not aggravated | escalate · `high_urgency` |
+| THIS IS RIDICULOUS!!! The footer still shows the wrong year | Technical / **Medium** | **aggravated** | **no escalation** · `none` |
+| Hi, thanks for your help so far. Could I speak with a supervisor please? | General / **Low** | not aggravated | escalate · `customer_requested` |
+| Third time reporting this. Still no reply. The site is down AGAIN and it is unacceptable. | Technical / **High** | **aggravated** | escalate · `high_urgency_and_aggravated` |
+| THANKS SO MUCH!!! You fixed it so fast | General / **Low** | signals: `excessive_punctuation`, **not aggravated** | no escalation · `none` |
+| We are evaluating competitors as our reports keep failing before our Friday deadline | Technical / **High** | **aggravated** (`threatening_to_leave`) | escalate · `high_urgency_and_aggravated` |
+
+Rows two and three are the pair that proves the design: a furious customer with a cosmetic
+bug does **not** jump the queue, and a grateful, polite, Low-urgency customer who asks for
+a manager **does** get one.
+
+Removing tone from the fallback scorer changed no test outcomes — every existing urgency
+test still passed, because impact keywords were already carrying those cases. Two tests
+were renamed, though: "shouting raises urgency" now passes because `is down` is a critical
+signal, not because capitals add points, and a test asserting that name would have been
+quietly lying about why it was green. There is now an explicit test that tone moves urgency
+in neither direction.

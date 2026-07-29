@@ -187,6 +187,11 @@ function HistoryPage() {
                           🚩 Supervisor requested
                         </span>
                       )}
+                      {item.aggravated && (
+                        <span className="text-xs bg-orange-100 text-orange-900 px-3 py-1 rounded-full font-semibold">
+                          😠 Upset customer
+                        </span>
+                      )}
                       {item.review && (
                         <span className={`text-xs px-3 py-1 rounded-full font-semibold ${
                           item.review.verdict === 'Send as is' ? 'bg-green-100 text-green-900' :

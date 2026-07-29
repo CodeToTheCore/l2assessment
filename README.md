@@ -22,25 +22,28 @@ Short version:
   target from its urgency, with overdue counts in the nav bar and a "Needs attention" panel.
 - **Draft replies can be reviewed before sending** — the model checks accuracy, completeness,
   tone and ownership, and returns a verdict plus a suggested rewrite.
-- **Guarded storage layer, 53 unit tests, `.env` added to `.gitignore`.**
+- **Tone, impact and routing are separate layers** — `aggravation.js` measures how upset the
+  customer is, `escalation.js` decides routing from an allow-listed reason enum, and neither
+  touches the LLM. Being upset does not jump the queue; being blocked does.
+- **Guarded storage layer, 76 unit tests, `.env` added to `.gitignore`.**
 
 ### What wasn't working before
 
 | Area | Before | After |
 |---|---|---|
-| **Urgency scoring** | The only rule that *raised* the score was the count of `!`. ALL-CAPS subtracted 50, short messages up to 100 (two stacking branches), politeness and `?` subtracted, and the score changed with the time of day and day of week — so the same message got a different urgency depending on when you clicked, and history was not reproducible. `High` needed `> 80` but one `!` landed on exactly 80. "Our production server is down" scored **Low**; agreement with my own labels was **3/12**. | The LLM scores urgency from business impact in the same call as the category, with tone explicitly excluded. **8/8** on held-out messages. The rewritten keyword scorer — real signal tiers, no clock dependency, shouting counted as urgency rather than against it — is now only the fallback. |
+| **Urgency scoring** | The only rule that *raised* the score was the count of `!`. ALL-CAPS subtracted 50, short messages up to 100 (two stacking branches), politeness and `?` subtracted, and the score changed with the time of day and day of week — so the same message got a different urgency depending on when you clicked, and history was not reproducible. `High` needed `> 80` but one `!` landed on exactly 80. "Our production server is down" scored **Low**; agreement with my own labels was **3/12**. | The LLM scores urgency from business impact in the same call as the category, with tone explicitly excluded. **8/8** on held-out messages. The rewritten keyword scorer — real signal tiers, no clock dependency, no tone terms at all — is now only the fallback. |
 | **Categorization** | The model was asked an open question and its reply *prose* was scanned for keywords in a fixed order, `billing` first, so a reply saying *"this is not a billing issue, it's a bug in the export"* was classified **Billing Issue**. `temperature: 0.7` meant the same message could be labelled differently on consecutive runs. | JSON mode at `temperature: 0`, with the category read from a declared field and validated against an allow-list. Unrecognised values become `Unknown` → *review manually* instead of a confident guess. **6/6** on the examples below. |
 | **Recommended actions** | `Feature Request` returned *"Ask user to check billing portal."* — a copy-paste of the billing entry. `getRecommendedAction(category, urgency)` accepted `urgency` and never used it, so a High-urgency outage and a Low-urgency question got identical advice. | Every category has its own action, and urgency drives a response-time line and escalation. |
 | **AI failures** | Any API error fell through to canned keyword output with only a `console.warn`, while the UI kept the heading "AI Reasoning". The bundled API key was **expired**, so this was the app's permanent state and nothing said so. Fallback wording was picked with `Math.random()`, so re-analysing one message gave different explanations. | Amber banner when the fallback ran, urgency badge marked *AI-scored* or *rule-scored*, "Rule-based" chip in history. No key means no request is attempted. Fallback wording is a stable hash of the message. |
 | **Stored history** | Four unguarded `JSON.parse` calls — one malformed value blanked the page. No record ids, unbounded growth with no quota handling, and the list was sorted **alphabetically by message text** instead of newest-first. | One guarded storage module: corrupt entries filtered out, capped at 200 records, stable ids, newest-first, failed writes reported to the user. |
 | **Navigation** | `window.location.href` and a raw `<a href>` forced full page reloads inside the single-page app; two `setState`-in-effect patterns caused cascading renders (both were lint errors). | `useNavigate` / `Link`, with state derived during render. Lint is clean (was 6 errors). |
 | **Secrets** | `.env` was **not** in `.gitignore` — it sat untracked next to a live API key, one `git add -A` from being published. | Ignored, with an `!.env.example` exception. Verified it was never committed, so there is nothing in git history to scrub. |
-| **Tests** | None, so none of the above had anything to catch it. | 53 unit tests (`npm test`, no new dependencies), written as regressions against these specific bugs. |
+| **Tests** | None, so none of the above had anything to catch it. | 76 unit tests (`npm test`, no new dependencies), written as regressions against these specific bugs. |
 
 ### Added beyond the original scope
 
-Three features the original app had no notion of, all covered in
-[IMPROVEMENTS.md](IMPROVEMENTS.md) section 6:
+Features the original app had no notion of, covered in
+[IMPROVEMENTS.md](IMPROVEMENTS.md) sections 6 and 7:
 
 - **Supervisor routing.** The triage call now also returns whether the customer asked for a
   supervisor, as a field separate from urgency — a polite, low-impact message can still need a
@@ -57,6 +60,12 @@ Three features the original app had no notion of, all covered in
   record as an audit trail. There is deliberately **no rule-based fallback** for this — judging
   a reply is not something keywords can do, so with no API key it reports unavailable rather
   than inventing a verdict a supervisor might trust.
+- **Tone as its own layer.** `detectAggravation(message)` returns `{aggravated, signals}` from
+  a hard-coded phrase list — no weighted stacking, since that was the original scorer's worst
+  bug. `decideEscalation({category, urgency, aggravated, customerRequestedSupervisor})` returns
+  `{escalate, reason}` from an allow-listed enum and never sees the raw message. **Aggravation
+  alone does not escalate**: being upset is not being blocked, and letting tone drive routing
+  rewards whoever shouts loudest. It changes how you open the reply, not where it goes.
 
 Two findings came from measurement rather than reading the code, and both are written up
 in [IMPROVEMENTS.md](IMPROVEMENTS.md): a rewritten keyword scorer that hit **12/12** on
@@ -125,7 +134,7 @@ Support teams waste time manually reading and triaging customer messages. This t
 
 5. **Run the checks** (optional)
    ```bash
-   npm test        # 53 unit tests, no extra dependencies (node --test)
+   npm test        # 76 unit tests, no extra dependencies (node --test)
    npm run lint
    npm run build
    ```

@@ -5,6 +5,8 @@ import { triageMessage, reviewAgentReply } from '../utils/llmHelper'
 import { getRecommendedAction } from '../utils/templates'
 import { appendHistory, createAnalysisId, updateEntry } from '../utils/storage'
 import { targetFor, formatRemaining } from '../utils/sla'
+import { detectAggravation } from '../utils/aggravation'
+import { decideEscalation, REASON_LABELS } from '../utils/escalation'
 
 function AnalyzePage() {
   const location = useLocation()
@@ -32,13 +34,28 @@ function AnalyzePage() {
     setReview(null)
 
     try {
-      // Category, urgency and the supervisor flag come from one LLM call, with a
-      // rule-based fallback
+      // Layer 1 - classification. Category, urgency and the supervisor flag come
+      // from one LLM call, with a rule-based fallback.
       const { category, urgency, supervisorRequested, reasoning, source, urgencySource } =
         await triageMessage(message)
 
+      // Layer 2 - tone, measured from the message by rules only. Kept out of the
+      // LLM call so it cannot contaminate the impact judgment.
+      const { aggravated, signals: aggravationSignals } = detectAggravation(message)
+
+      // Layer 3 - routing, which consumes the layers above and never the raw text.
+      const escalation = decideEscalation({
+        category,
+        urgency,
+        aggravated,
+        customerRequestedSupervisor: supervisorRequested
+      })
+
       // Get recommended action (template-based)
-      const recommendedAction = getRecommendedAction(category, urgency, supervisorRequested)
+      const recommendedAction = getRecommendedAction(category, urgency, {
+        supervisorRequested,
+        aggravated
+      })
 
       const createdAt = new Date()
       const analysisResult = {
@@ -47,6 +64,9 @@ function AnalyzePage() {
         category,
         urgency,
         supervisorRequested,
+        aggravated,
+        aggravationSignals,
+        escalation,
         recommendedAction,
         reasoning,
         source,
@@ -114,10 +134,8 @@ function AnalyzePage() {
     setReview(null)
   }
 
-  // A supervisor request or a High urgency message should not be answered without
-  // a second pair of eyes.
-  const reviewRecommended =
-    results?.supervisorRequested === true || results?.urgency === 'High'
+  // Anything that escalated should not be answered without a second pair of eyes.
+  const reviewRecommended = results?.escalation?.escalate === true
 
   const handleCopy = async () => {
     const text = `Category: ${results.category}\nUrgency: ${results.urgency}\nRecommendation: ${results.recommendedAction}\n\nReasoning: ${results.reasoning}`
@@ -243,6 +261,26 @@ function AnalyzePage() {
               </div>
 
               <div>
+                <div className="text-sm font-semibold text-gray-600 mb-1">Escalation</div>
+                <div className={`inline-block px-4 py-2 rounded-lg font-semibold ${
+                  results.escalation.escalate
+                    ? 'bg-orange-200 text-orange-900'
+                    : 'bg-gray-100 text-gray-700'
+                }`}>
+                  {results.escalation.escalate ? 'Escalate' : 'No escalation'}
+                  <span className="ml-2 font-normal">
+                    · {REASON_LABELS[results.escalation.reason]}
+                  </span>
+                </div>
+                {results.aggravationSignals?.length > 0 && (
+                  <div className="text-xs text-gray-500 mt-1">
+                    Tone signals: {results.aggravationSignals.join(', ').replace(/_/g, ' ')}
+                    {!results.aggravated && ' (not enough on their own to count as aggravated)'}
+                  </div>
+                )}
+              </div>
+
+              <div>
                 <div className="text-sm font-semibold text-gray-600 mb-1">Respond By</div>
                 <div className="inline-block bg-gray-100 text-gray-800 px-4 py-2 rounded-lg font-semibold">
                   {new Date(results.dueBy).toLocaleString()}
@@ -301,9 +339,8 @@ function AnalyzePage() {
             {reviewRecommended && (
               <div className="mb-4 bg-orange-50 border border-orange-200 text-orange-900 rounded-lg p-3 text-sm">
                 <span className="font-semibold">Review recommended.</span>{' '}
-                {results.supervisorRequested
-                  ? 'The customer asked for a supervisor, so this reply should be checked before sending.'
-                  : 'This is a High urgency message, so this reply should be checked before sending.'}
+                {REASON_LABELS[results.escalation.reason]} — this reply should be checked
+                before sending.
               </div>
             )}
 

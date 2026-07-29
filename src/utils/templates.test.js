@@ -47,13 +47,13 @@ test('a missing urgency still returns usable advice', () => {
 test('a supervisor request escalates at any urgency', () => {
   // A calm, low-impact message that asks for a manager still needs a manager.
   for (const urgency of ['High', 'Medium', 'Low']) {
-    const action = getRecommendedAction('General Inquiry', urgency, true)
+    const action = getRecommendedAction('General Inquiry', urgency, { supervisorRequested: true })
     assert.match(action, /supervisor/i, `${urgency} with supervisor request`)
   }
 })
 
 test('the supervisor line asks for the reply to be reviewed', () => {
-  const action = getRecommendedAction('Billing Issue', 'Low', true)
+  const action = getRecommendedAction('Billing Issue', 'Low', { supervisorRequested: true })
   assert.match(action, /reviewed before sending/)
   // Still carries the category advice.
   assert.match(action, /billing portal/)
@@ -61,13 +61,13 @@ test('the supervisor line asks for the reply to be reviewed', () => {
 
 test('no supervisor request leaves the urgency guidance untouched', () => {
   assert.equal(
-    getRecommendedAction('Billing Issue', 'Low', false),
+    getRecommendedAction('Billing Issue', 'Low', { supervisorRequested: false }),
     getRecommendedAction('Billing Issue', 'Low')
   )
-  assert.doesNotMatch(getRecommendedAction('Billing Issue', 'Low', false), /supervisor/i)
+  assert.doesNotMatch(getRecommendedAction('Billing Issue', 'Low', { supervisorRequested: false }), /supervisor/i)
 })
 
 test('only a real true escalates, not any truthy value', () => {
-  assert.doesNotMatch(getRecommendedAction('Billing Issue', 'Low', 'maybe'), /supervisor/i)
+  assert.doesNotMatch(getRecommendedAction('Billing Issue', 'Low', { supervisorRequested: 'maybe' }), /supervisor/i)
   assert.doesNotMatch(getRecommendedAction('Billing Issue', 'Low', null), /supervisor/i)
 })

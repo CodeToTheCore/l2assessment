@@ -21,9 +21,11 @@ test('non-blocking problems score Medium', () => {
   )
 })
 
-test('shouting raises urgency instead of lowering it', () => {
-  // Regression: the original scorer subtracted 50 points for ALL CAPS.
+test('shouting is not penalised', () => {
+  // Regression: the original scorer subtracted 50 points for ALL CAPS, so a
+  // shouted outage scored lower than a polite question.
   assert.equal(calculateUrgency('SITE IS DOWN'), 'High')
+  assert.equal(calculateUrgency('site is down'), 'High')
 })
 
 test('politeness does not downgrade a genuine emergency', () => {
@@ -32,6 +34,19 @@ test('politeness does not downgrade a genuine emergency', () => {
     calculateUrgency('Hi, could you please help? Our production integration failed and we have a deadline today. Thank you!'),
     'High'
   )
+})
+
+test('tone alone does not move urgency in either direction', () => {
+  // Urgency measures business impact only. Shouting, punctuation, politeness and
+  // gratitude belong to detectAggravation, which feeds escalation separately -
+  // scoring them here as well would double-count them.
+  const impact = 'the export button does nothing'
+  const baseline = calculateUrgency(impact)
+
+  assert.equal(calculateUrgency(impact.toUpperCase()), baseline)
+  assert.equal(calculateUrgency(`${impact}!!!`), baseline)
+  assert.equal(calculateUrgency(`Please could you look at this - ${impact}? Thank you!`), baseline)
+  assert.equal(calculateUrgency(`THIS IS RIDICULOUS!!! ${impact}`), baseline)
 })
 
 test('short messages are not penalised for being short', () => {

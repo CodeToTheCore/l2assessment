@@ -34,9 +34,6 @@ const MEDIUM_SIGNALS = [
   "won't load", 'wont load', 'will not load', 'loading forever', 'keeps loading',
 ]
 
-const POLITE_WORDS = ['please', 'thank', 'thanks', 'appreciate', 'kindly']
-const POSITIVE_WORDS = ['happy', 'love', 'great', 'excellent', 'wonderful']
-
 const BASE_SCORE = 30
 const HIGH_THRESHOLD = 70
 const MEDIUM_THRESHOLD = 35
@@ -69,23 +66,11 @@ function scoreUrgency(message) {
   score += Math.min(highHits * 15, 45)
   score += Math.min(mediumHits * 10, 30)
 
-  // Emphasis: shouting and exclamation marks raise urgency, they don't lower it.
-  const exclamations = (message.match(/!/g) || []).length
-  score += Math.min(exclamations, 3) * 4
-  const hasLetters = /[a-z]/i.test(message)
-  if (hasLetters && message.length > 10 && message === message.toUpperCase()) {
-    score += 10
-  }
-
-  // Tone only softens genuinely ambiguous messages. A polite customer reporting
-  // an outage is still reporting an outage, so skip these when a critical or
-  // high signal is present.
-  if (criticalHits === 0 && highHits === 0) {
-    score -= Math.min(countSignals(text, POLITE_WORDS) * 3, 6)
-    if (message.includes('?')) score -= 5
-    if (countSignals(text, POSITIVE_WORDS) > 0) score -= 10
-  }
-
+  // No tone terms here on purpose. Urgency measures business impact only;
+  // shouting, exclamation marks, politeness and gratitude are handled by
+  // detectAggravation, which feeds escalation separately. Scoring tone in both
+  // places would double-count it, and scoring it here is what made the original
+  // version treat a shouted outage as calmer than a polite question.
   return clamp(score, 0, 100)
 }
 

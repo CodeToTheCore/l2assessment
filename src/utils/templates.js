@@ -2,6 +2,8 @@
  * Recommendation Templates - Maps categories to recommended actions
  */
 
+import { decideEscalation } from './escalation.js'
+
 const actionTemplates = {
   "Billing Issue": "Verify the charge in the billing portal, then confirm the customer's payment method and invoice history.",
   "Technical Problem": "Try to reproduce the issue, then collect browser/OS details and any error messages before handing to engineering.",
@@ -16,46 +18,40 @@ const urgencyGuidance = {
   Low: "Handle in the normal queue."
 }
 
-const SUPERVISOR_GUIDANCE =
-  "The customer asked for a supervisor - hand this to one and have the reply reviewed before sending."
-
-/**
- * Determines if a message should be escalated to a senior agent.
- *
- * Urgency carries the impact judgment, so it is the trigger for time-based
- * escalation. An earlier version also escalated every Medium billing message,
- * which paged a senior agent for routine work like "I need to change the card on
- * file before the next renewal".
- *
- * A supervisor request escalates on its own, whatever the urgency: a calm,
- * low-impact message that asks for a manager still needs a manager.
- *
- * @param {string} urgency - The urgency level
- * @param {boolean} [supervisorRequested] - Whether the customer asked for a supervisor
- * @returns {boolean} - Whether to escalate
- */
-function shouldEscalate(urgency, supervisorRequested) {
-  return urgency === 'High' || supervisorRequested === true
+// Wording per escalation reason, so the advice explains *why* it is escalating.
+const escalationGuidance = {
+  customer_requested:
+    "The customer asked for a supervisor - hand this to one and have the reply reviewed before sending.",
+  high_urgency_and_aggravated:
+    "Escalate to a senior agent and respond within 1 hour. The customer is already upset, so acknowledge that first.",
+  high_urgency: urgencyGuidance.High,
 }
 
 /**
- * Get recommended action for a given category, urgency and supervisor request.
+ * Get recommended action for a triaged message.
+ *
+ * Consumes the escalation decision rather than re-deriving it, so routing logic
+ * lives in one place ([escalation.js](escalation.js)) and this module stays
+ * responsible only for wording.
  *
  * @param {string} category - The message category
  * @param {string} [urgency] - The urgency level ("High" | "Medium" | "Low")
- * @param {boolean} [supervisorRequested] - Whether the customer asked for a supervisor
+ * @param {{supervisorRequested?: boolean, aggravated?: boolean}} [signals]
  * @returns {string} - Recommended next step
  */
-export function getRecommendedAction(category, urgency, supervisorRequested = false) {
+export function getRecommendedAction(category, urgency, signals) {
   const action = actionTemplates[category] || actionTemplates.Unknown
+  // Tolerate null as well as a missing argument.
+  const given = signals ?? {}
 
-  if (supervisorRequested === true) {
-    return `${SUPERVISOR_GUIDANCE} ${action}`
-  }
+  const { reason } = decideEscalation({
+    category,
+    urgency,
+    aggravated: given.aggravated,
+    customerRequestedSupervisor: given.supervisorRequested,
+  })
 
-  const guidance = shouldEscalate(urgency, supervisorRequested)
-    ? urgencyGuidance.High
-    : urgencyGuidance[urgency]
+  const guidance = escalationGuidance[reason] ?? urgencyGuidance[urgency]
 
   return guidance ? `${guidance} ${action}` : action
 }
