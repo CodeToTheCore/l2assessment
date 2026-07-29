@@ -16,7 +16,13 @@ Short version:
 - **Failures are visible.** The app now says when a result came from the fallback rules
   rather than the model, instead of labelling everything "AI Reasoning".
 - **Recommendations use category *and* urgency**, and each category has its own action.
-- **Guarded storage layer, 22 unit tests, `.env` added to `.gitignore`.**
+- **Supervisor requests are detected and routed** — a separate field from urgency, since a
+  calm message can still ask for a manager. Escalates on its own and prompts a reply review.
+- **Follow-ups are tracked so nothing goes unanswered** — each analysis gets a respond-by
+  target from its urgency, with overdue counts in the nav bar and a "Needs attention" panel.
+- **Draft replies can be reviewed before sending** — the model checks accuracy, completeness,
+  tone and ownership, and returns a verdict plus a suggested rewrite.
+- **Guarded storage layer, 53 unit tests, `.env` added to `.gitignore`.**
 
 ### What wasn't working before
 
@@ -29,7 +35,28 @@ Short version:
 | **Stored history** | Four unguarded `JSON.parse` calls — one malformed value blanked the page. No record ids, unbounded growth with no quota handling, and the list was sorted **alphabetically by message text** instead of newest-first. | One guarded storage module: corrupt entries filtered out, capped at 200 records, stable ids, newest-first, failed writes reported to the user. |
 | **Navigation** | `window.location.href` and a raw `<a href>` forced full page reloads inside the single-page app; two `setState`-in-effect patterns caused cascading renders (both were lint errors). | `useNavigate` / `Link`, with state derived during render. Lint is clean (was 6 errors). |
 | **Secrets** | `.env` was **not** in `.gitignore` — it sat untracked next to a live API key, one `git add -A` from being published. | Ignored, with an `!.env.example` exception. Verified it was never committed, so there is nothing in git history to scrub. |
-| **Tests** | None, so none of the above had anything to catch it. | 22 unit tests (`npm test`, no new dependencies), written as regressions against these specific bugs. |
+| **Tests** | None, so none of the above had anything to catch it. | 53 unit tests (`npm test`, no new dependencies), written as regressions against these specific bugs. |
+
+### Added beyond the original scope
+
+Three features the original app had no notion of, all covered in
+[IMPROVEMENTS.md](IMPROVEMENTS.md) section 6:
+
+- **Supervisor routing.** The triage call now also returns whether the customer asked for a
+  supervisor, as a field separate from urgency — a polite, low-impact message can still need a
+  manager. It escalates on its own and flags the reply for review. Keyword detection is the
+  fallback. **6/6 on live examples**, including the two cases that matter most: an furious
+  customer who asks for nobody, and one who mentions *their own* manager.
+- **Follow-up tracking.** Every analysis gets a respond-by target from its urgency (High 1h,
+  Medium 24h, Low 72h) and an open/done state. Overdue and due-soon counts show as a badge in
+  the nav bar, a "Needs attention" panel on the Dashboard, and per-row chips in History with a
+  "Mark done" button.
+- **Draft reply review.** Write the reply you plan to send and have it checked before it goes
+  out, against accuracy, completeness, tone and ownership. Returns *Send as is* / *Needs edits*
+  / *Do not send*, the specific issues, and a suggested rewrite; the verdict is stored on the
+  record as an audit trail. There is deliberately **no rule-based fallback** for this — judging
+  a reply is not something keywords can do, so with no API key it reports unavailable rather
+  than inventing a verdict a supervisor might trust.
 
 Two findings came from measurement rather than reading the code, and both are written up
 in [IMPROVEMENTS.md](IMPROVEMENTS.md): a rewritten keyword scorer that hit **12/12** on
@@ -98,7 +125,7 @@ Support teams waste time manually reading and triaging customer messages. This t
 
 5. **Run the checks** (optional)
    ```bash
-   npm test        # 22 unit tests, no extra dependencies (node --test)
+   npm test        # 53 unit tests, no extra dependencies (node --test)
    npm run lint
    npm run build
    ```
@@ -111,16 +138,18 @@ Support teams waste time manually reading and triaging customer messages. This t
 1. **Paste Message**: User pastes a customer support message into the text area
 2. **Analyze**: Click "Analyze Message" to process the input
 3. **Triage**: The app then runs:
-   - **Category + Urgency** (LLM): One structured Groq call (Llama 3.3 70B) returns both,
-     validated against fixed allow-lists
-   - **Urgency fallback** (Rule-based): A deterministic keyword scorer, used only when the
-     LLM is unavailable or returns an unusable urgency
-   - **Recommendation** (Template-based): Maps category *and* urgency to a recommended
-     action, escalating where warranted
-4. **Display Results**: Shows category, urgency tag (marked AI-scored or rule-scored),
-   recommended action, and the reasoning behind it
-5. **History**: Analyses are saved to localStorage (newest first, capped at 200 records)
-   and viewable in the History tab
+   - **Category + Urgency + Supervisor flag** (LLM): One structured Groq call (Llama 3.3 70B)
+     returns all three, validated against fixed allow-lists
+   - **Fallbacks** (Rule-based): A deterministic keyword scorer for urgency and a keyword check
+     for supervisor requests, used only when the LLM is unavailable or returns unusable values
+   - **Recommendation** (Template-based): Maps category, urgency and the supervisor flag to a
+     recommended action, escalating where warranted
+4. **Display Results**: Shows category, urgency tag (marked AI-scored or rule-scored), the
+   respond-by target, recommended action, and the reasoning behind it
+5. **Draft Reply** (optional): Write the reply you plan to send and have it reviewed for
+   accuracy, completeness, tone and ownership before it goes out
+6. **History**: Analyses are saved to localStorage (newest first, capped at 200 records) with
+   follow-up state, so overdue items surface in the nav bar and on the Dashboard
 
 
 ## Example Test Messages

@@ -1,8 +1,27 @@
+import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
+import { readHistory } from '../utils/storage'
+import { summarizeFollowUps } from '../utils/sla'
+
+// How often to re-check whether a follow-up has gone overdue while the app sits open.
+const TICK_MS = 30 * 1000
 
 function Navigation() {
   const location = useLocation()
-  
+
+  // A timer so an item can go overdue in place, without the user having to click
+  // anything. Each tick re-renders, which re-reads the badge counts below.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick((value) => value + 1), TICK_MS)
+    return () => clearInterval(id)
+  }, [])
+
+  // Computed on every render (navigation or tick) rather than memoised against a
+  // dependency list this doesn't actually read - it is one localStorage read of
+  // at most 200 records.
+  const followUps = summarizeFollowUps(readHistory())
+
   const isActive = (path) => {
     return location.pathname === path
   }
@@ -46,13 +65,28 @@ function Navigation() {
             </Link>
             <Link
               to="/history"
-              className={`px-4 py-2 rounded ${
-                isActive('/history') 
-                  ? 'bg-blue-700 font-semibold' 
+              className={`px-4 py-2 rounded flex items-center ${
+                isActive('/history')
+                  ? 'bg-blue-700 font-semibold'
                   : 'hover:bg-blue-500'
               }`}
             >
               History
+              {followUps.overdue.length > 0 ? (
+                <span
+                  className="ml-2 bg-red-600 text-white text-xs font-bold px-2 py-0.5 rounded-full"
+                  title={`${followUps.overdue.length} follow-up(s) past their response target`}
+                >
+                  {followUps.overdue.length} overdue
+                </span>
+              ) : followUps.dueSoon.length > 0 && (
+                <span
+                  className="ml-2 bg-orange-400 text-orange-950 text-xs font-bold px-2 py-0.5 rounded-full"
+                  title={`${followUps.dueSoon.length} follow-up(s) due soon`}
+                >
+                  {followUps.dueSoon.length} due soon
+                </span>
+              )}
             </Link>
             <Link
               to="/dashboard"

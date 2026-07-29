@@ -16,31 +16,44 @@ const urgencyGuidance = {
   Low: "Handle in the normal queue."
 }
 
+const SUPERVISOR_GUIDANCE =
+  "The customer asked for a supervisor - hand this to one and have the reply reviewed before sending."
+
 /**
  * Determines if a message should be escalated to a senior agent.
  *
- * Urgency already carries the impact judgment, so it is the only trigger. An
- * earlier version also escalated every Medium billing message, which paged a
- * senior agent for routine work like "I need to change the card on file before
- * the next renewal".
+ * Urgency carries the impact judgment, so it is the trigger for time-based
+ * escalation. An earlier version also escalated every Medium billing message,
+ * which paged a senior agent for routine work like "I need to change the card on
+ * file before the next renewal".
+ *
+ * A supervisor request escalates on its own, whatever the urgency: a calm,
+ * low-impact message that asks for a manager still needs a manager.
  *
  * @param {string} urgency - The urgency level
+ * @param {boolean} [supervisorRequested] - Whether the customer asked for a supervisor
  * @returns {boolean} - Whether to escalate
  */
-function shouldEscalate(urgency) {
-  return urgency === 'High'
+function shouldEscalate(urgency, supervisorRequested) {
+  return urgency === 'High' || supervisorRequested === true
 }
 
 /**
- * Get recommended action for a given category and urgency.
+ * Get recommended action for a given category, urgency and supervisor request.
  *
  * @param {string} category - The message category
  * @param {string} [urgency] - The urgency level ("High" | "Medium" | "Low")
+ * @param {boolean} [supervisorRequested] - Whether the customer asked for a supervisor
  * @returns {string} - Recommended next step
  */
-export function getRecommendedAction(category, urgency) {
+export function getRecommendedAction(category, urgency, supervisorRequested = false) {
   const action = actionTemplates[category] || actionTemplates.Unknown
-  const guidance = shouldEscalate(urgency)
+
+  if (supervisorRequested === true) {
+    return `${SUPERVISOR_GUIDANCE} ${action}`
+  }
+
+  const guidance = shouldEscalate(urgency, supervisorRequested)
     ? urgencyGuidance.High
     : urgencyGuidance[urgency]
 

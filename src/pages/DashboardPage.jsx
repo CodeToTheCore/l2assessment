@@ -1,5 +1,7 @@
 import { useMemo } from 'react'
-import { readHistory } from '../utils/storage'
+import { Link } from 'react-router-dom'
+import { readHistory, truncate } from '../utils/storage'
+import { summarizeFollowUps, slaStatus, formatRemaining } from '../utils/sla'
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
@@ -49,6 +51,12 @@ function DashboardPage() {
       .sort((a, b) => b.count - a.count)
   }, [history])
 
+  const followUps = useMemo(() => summarizeFollowUps(history), [history])
+  const supervisorRequests = useMemo(
+    () => history.filter((item) => item.supervisorRequested && item.status !== 'done'),
+    [history]
+  )
+
   const urgencyData = useMemo(() => {
     const urgency = { High: 0, Medium: 0, Low: 0 }
     history.forEach((item) => {
@@ -84,6 +92,63 @@ function DashboardPage() {
             <div className="text-3xl font-bold text-purple-600">{stats.avgPerDay}</div>
           </div>
         </div>
+
+        {/* Needs attention - overdue and due-soon follow-ups, plus supervisor requests */}
+        {(followUps.needsAttention > 0 || supervisorRequests.length > 0) && (
+          <div className="bg-white rounded-lg shadow border-l-4 border-red-500 p-6 mb-8">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-gray-900">
+                ⏰ Needs attention
+              </h2>
+              <Link to="/history" className="text-sm text-blue-600 hover:underline font-semibold">
+                Open in History →
+              </Link>
+            </div>
+
+            {supervisorRequests.length > 0 && (
+              <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-900">
+                <span className="font-bold">{supervisorRequests.length}</span> open{' '}
+                {supervisorRequests.length === 1 ? 'message' : 'messages'} where the customer
+                asked for a supervisor.
+              </div>
+            )}
+
+            <div className="space-y-2">
+              {[...followUps.overdue, ...followUps.dueSoon].slice(0, 8).map((item, index) => {
+                const sla = slaStatus(item)
+                return (
+                  <div
+                    key={item.id ?? `${item.timestamp}-${index}`}
+                    className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm text-gray-800 truncate">
+                        "{truncate(item.message, 80)}"
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {item.category} · {item.urgency} urgency
+                        {item.supervisorRequested && ' · 🚩 supervisor requested'}
+                      </div>
+                    </div>
+                    <span className={`ml-3 text-xs px-3 py-1 rounded-full font-semibold whitespace-nowrap ${
+                      sla.state === 'overdue'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-orange-200 text-orange-900'
+                    }`}>
+                      {formatRemaining(sla.msRemaining)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+
+            {followUps.needsAttention > 8 && (
+              <div className="text-xs text-gray-500 mt-3">
+                Showing 8 of {followUps.needsAttention}. See History for the rest.
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-6">
           {/* Category Distribution */}

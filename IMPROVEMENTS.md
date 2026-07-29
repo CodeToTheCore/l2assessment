@@ -304,3 +304,105 @@ tuning against my own examples.
 5. **Surface confidence and route low-confidence messages to a human queue.** The
    honest-fallback work here is the first step; the next is the model reporting when it
    is unsure, so the tool degrades into "needs review" instead of guessing.
+
+---
+
+## 6. Added beyond the original scope
+
+Fixing the triage output makes the first pass trustworthy, but two gaps remained that
+matter for the business model. A correct label does not guarantee anyone acts on it, and
+a correct label does not stop an agent sending a bad reply. These three features close
+that loop.
+
+### Supervisor routing
+
+The triage call now also returns `supervisorRequested`, deliberately **separate from
+urgency**. They answer different questions: urgency is *how much business impact does
+this have*, a supervisor request is *who does the customer want to deal with*. Conflating
+them would get both wrong — a calm, low-impact message asking for a manager still needs a
+manager, and a furious customer reporting an outage needs speed rather than a supervisor.
+
+A request escalates on its own regardless of urgency, shows a red banner on the result and
+a chip in history, and flags the reply for review. The keyword check in
+[`supervisor.js`](src/utils/supervisor.js) is the fallback when the API is unavailable.
+
+**Live results — 6/6**, including the three cases that decide whether this is useful:
+
+| Message | Detected | Triaged as |
+|---|---|---|
+| I have had enough of this. Let me speak to your supervisor. | ✅ yes | General Inquiry / Low |
+| Can I talk to your manager please? This is the third agent I have explained this to. | ✅ yes | Technical Problem / Medium |
+| I would like to make a formal complaint about how this was handled. | ✅ yes | General Inquiry / Medium |
+| THIS IS COMPLETELY UNACCEPTABLE. Your product has been broken for a week. | ✅ no | Technical Problem / High |
+| My manager asked me to follow up on our open ticket about the export bug. | ✅ no | Technical Problem / Medium |
+| Can you add a dark mode feature? | ✅ no | Feature Request / Low |
+
+The first row is the argument for keeping the fields separate: **Low** urgency, but it
+still escalates and asks for a reply review. Rows four and five are the ones a naive
+implementation fails — anger is not a supervisor request, and *their* manager is not ours.
+
+The keyword fallback had a real bug that its unit test caught: `"our manager"` was being
+matched as a substring inside `"your manager"`, so asking for *your* manager was
+suppressed by a rule meant to ignore the customer's *own* manager. The negative list now
+matches on word boundaries.
+
+### Follow-up tracking
+
+Every analysis gets a respond-by target from its urgency — **High 1 hour, Medium 24 hours,
+Low 72 hours** — and an open/done state. Overdue and due-soon counts appear as a badge on
+the History tab, a "Needs attention" panel on the Dashboard, and per-row chips in History
+with a "Mark done" button. The nav badge re-checks on a 30-second timer, so an item can go
+overdue while you are looking at the page.
+
+[`sla.js`](src/utils/sla.js) takes `now` as an explicit parameter rather than reading the
+clock inside itself, which is what makes it testable — the same lesson as the original
+urgency scorer's hidden time dependency, applied deliberately this time. Records saved
+before this feature existed derive a target from their timestamp and urgency, so no
+migration is needed.
+
+Two decisions worth flagging:
+
+- **Calendar hours, not business hours.** Business-hour maths needs the customer's support
+  schedule, holidays and time zone. That belongs on a server, not hardcoded in a browser.
+- **In-app only, no browser notifications.** Desktop notifications need a permission
+  prompt, are silenced by default in many setups, and only fire while the tab is open — an
+  alert system that quietly does not fire is worse than none. Real reminders need a
+  backend that can send email or Slack, which is the same backend item as section 5.
+
+### Draft reply review
+
+An agent writes the reply they plan to send, and a supervisor-persona review checks it on
+four axes — accuracy (does it invent facts, refunds or timelines?), completeness, tone
+relative to how upset the customer is, and ownership of a clear next step. It returns
+*Send as is* / *Needs edits* / *Do not send*, the specific issues, and a suggested
+rewrite. The verdict is stored on the record as an audit trail. Review is prompted
+automatically when a supervisor was requested or urgency is High.
+
+**Live results.** Four drafts against one customer message about a double charge with two
+ignored emails:
+
+| Draft | Verdict | What it caught |
+|---|---|---|
+| *"That's not our problem, you probably clicked twice. Check your bank."* | **Do not send** | Dismissive; shifts blame without investigating; ignores the earlier emails |
+| *"Sorry about that. We'll look into it."* | **Needs edits** | No next step or timeline; does not acknowledge the ignored emails |
+| *"I have already refunded you in full and upgraded your account to free for life."* | **Do not send** | *"Invents a fact (refund and account upgrade) that was not stated and may not be supported"* |
+| A specific reply naming the duplicate charge, the 3–5 day refund window, and a commitment to follow up | **Send as is** | No issues raised |
+
+The third row is the one I would show a coach. The draft is *friendly and confident* — the
+kind of reply that reads well and creates a support liability, because it promises a refund
+and a free account that nobody authorised. Tone-checking alone would pass it.
+
+**There is deliberately no rule-based fallback here.** Judging whether a reply is accurate
+and appropriately worded is exactly what keyword rules cannot do — the same conclusion as
+the urgency work. With no API key it reports unavailable rather than inventing a verdict,
+because a fabricated "Send as is" is worse than no review at all. An unparseable or
+unrecognised verdict also fails safe to *Needs edits*: a supervisor check should never wave
+a reply through because a value was unexpected.
+
+### Testing
+
+Test count went from 22 to **53**. The new ones cover the follow-up state machine
+(including the boundary where a deadline is exactly reached, and a corrupt timestamp not
+producing a false "overdue"), supervisor detection including the negative cases, the
+supervisor escalation path in the templates, and the review parser's fail-safe behaviour.
+Both features were also verified against the live API and against the no-key path.

@@ -65,6 +65,24 @@ export function appendHistory(entry) {
 }
 
 /**
+ * Merge a patch into one stored analysis, matched by id.
+ *
+ * @param {string} id
+ * @param {object} patch - Fields to overwrite on that entry
+ * @returns {Array<object> | null} - The updated history, or null if the write failed
+ */
+export function updateEntry(id, patch) {
+  // Records saved before ids existed cannot be matched safely - patching on an
+  // undefined id would hit every one of them at once.
+  if (!id) return null
+
+  const history = readHistory().map((entry) =>
+    entry.id === id ? { ...entry, ...patch } : entry
+  )
+  return writeHistory(history) ? history : null
+}
+
+/**
  * Remove all stored analyses.
  */
 export function clearHistory() {

@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
-import { triageMessage } from '../utils/llmHelper'
+import { triageMessage, reviewAgentReply } from '../utils/llmHelper'
 import { getRecommendedAction } from '../utils/templates'
-import { appendHistory, createAnalysisId } from '../utils/storage'
+import { appendHistory, createAnalysisId, updateEntry } from '../utils/storage'
+import { targetFor, formatRemaining } from '../utils/sla'
 
 function AnalyzePage() {
   const location = useLocation()
@@ -13,6 +14,9 @@ function AnalyzePage() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
   const [copied, setCopied] = useState(false)
+  const [reply, setReply] = useState('')
+  const [review, setReview] = useState(null)
+  const [isReviewing, setIsReviewing] = useState(false)
 
   const handleAnalyze = async () => {
     if (!message.trim()) {
@@ -24,25 +28,33 @@ function AnalyzePage() {
     setResults(null)
     setError(null)
     setCopied(false)
+    setReply('')
+    setReview(null)
 
     try {
-      // Category + urgency come from one LLM call, with a rule-based fallback
-      const { category, urgency, reasoning, source, urgencySource } =
+      // Category, urgency and the supervisor flag come from one LLM call, with a
+      // rule-based fallback
+      const { category, urgency, supervisorRequested, reasoning, source, urgencySource } =
         await triageMessage(message)
 
       // Get recommended action (template-based)
-      const recommendedAction = getRecommendedAction(category, urgency)
+      const recommendedAction = getRecommendedAction(category, urgency, supervisorRequested)
 
+      const createdAt = new Date()
       const analysisResult = {
         id: createAnalysisId(),
         message,
         category,
         urgency,
+        supervisorRequested,
         recommendedAction,
         reasoning,
         source,
         urgencySource,
-        timestamp: new Date().toISOString()
+        timestamp: createdAt.toISOString(),
+        // Follow-up tracking: when this needs a response by, and whether it has had one.
+        dueBy: new Date(createdAt.getTime() + targetFor(urgency)).toISOString(),
+        status: 'open'
       }
 
       setResults(analysisResult)
@@ -59,12 +71,53 @@ function AnalyzePage() {
     }
   }
 
+  const handleReview = async () => {
+    setIsReviewing(true)
+    setReview(null)
+    setError(null)
+
+    try {
+      const outcome = await reviewAgentReply({
+        message: results.message,
+        reply,
+        category: results.category,
+        urgency: results.urgency
+      })
+      setReview(outcome)
+
+      // Keep the draft and the verdict on the record, so a supervisor can audit
+      // what was reviewed and what the verdict was.
+      if (outcome.available) {
+        updateEntry(results.id, {
+          reply,
+          review: {
+            verdict: outcome.verdict,
+            issues: outcome.issues,
+            reviewedAt: new Date().toISOString()
+          }
+        })
+      }
+    } catch (err) {
+      console.error('Reply review failed:', err)
+      setReview({ available: false, error: 'The review could not be completed. Please try again.' })
+    } finally {
+      setIsReviewing(false)
+    }
+  }
+
   const handleClear = () => {
     setMessage('')
     setResults(null)
     setError(null)
     setCopied(false)
+    setReply('')
+    setReview(null)
   }
+
+  // A supervisor request or a High urgency message should not be answered without
+  // a second pair of eyes.
+  const reviewRecommended =
+    results?.supervisorRequested === true || results?.urgency === 'High'
 
   const handleCopy = async () => {
     const text = `Category: ${results.category}\nUrgency: ${results.urgency}\nRecommendation: ${results.recommendedAction}\n\nReasoning: ${results.reasoning}`
@@ -155,6 +208,16 @@ function AnalyzePage() {
               </div>
             )}
 
+            {results.supervisorRequested && (
+              <div className="mb-4 bg-red-50 border-2 border-red-300 text-red-900 rounded-lg p-4">
+                <div className="font-bold mb-1">🚩 Supervisor requested</div>
+                <p className="text-sm">
+                  This customer asked to be handled by a supervisor. Hand it to one, and
+                  have the reply reviewed below before it is sent.
+                </p>
+              </div>
+            )}
+
             <div className="space-y-4">
               <div>
                 <div className="text-sm font-semibold text-gray-600 mb-1">Category</div>
@@ -176,6 +239,19 @@ function AnalyzePage() {
                   'bg-green-200 text-green-900'
                 }`}>
                   {results.urgency}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold text-gray-600 mb-1">Respond By</div>
+                <div className="inline-block bg-gray-100 text-gray-800 px-4 py-2 rounded-lg font-semibold">
+                  {new Date(results.dueBy).toLocaleString()}
+                  <span className="ml-2 font-normal text-gray-600">
+                    ({formatRemaining(new Date(results.dueBy) - Date.now())})
+                  </span>
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Tracked as an open follow-up until it is marked done in History.
                 </div>
               </div>
 
@@ -211,6 +287,105 @@ function AnalyzePage() {
                 <span className="text-sm text-green-700 font-semibold">Copied to clipboard</span>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Draft reply + supervisor review */}
+        {results && (
+          <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Draft Reply</h2>
+            <p className="text-gray-600 mb-4 text-sm">
+              Write the response you plan to send, then have it reviewed before it goes out.
+            </p>
+
+            {reviewRecommended && (
+              <div className="mb-4 bg-orange-50 border border-orange-200 text-orange-900 rounded-lg p-3 text-sm">
+                <span className="font-semibold">Review recommended.</span>{' '}
+                {results.supervisorRequested
+                  ? 'The customer asked for a supervisor, so this reply should be checked before sending.'
+                  : 'This is a High urgency message, so this reply should be checked before sending.'}
+              </div>
+            )}
+
+            <label htmlFor="agent-reply" className="block text-sm font-semibold text-gray-700 mb-2">
+              Your reply to the customer
+            </label>
+            <textarea
+              id="agent-reply"
+              value={reply}
+              onChange={(e) => { setReply(e.target.value); setReview(null) }}
+              placeholder="Type the reply you would send..."
+              className="w-full border border-gray-300 rounded-lg p-3 h-32 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              disabled={isReviewing}
+            />
+
+            <div className="flex items-center space-x-3 mt-3">
+              <button
+                onClick={handleReview}
+                disabled={isReviewing || !reply.trim()}
+                className={`px-5 py-2 rounded-lg font-semibold ${
+                  isReviewing || !reply.trim()
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                }`}
+              >
+                {isReviewing ? 'Reviewing...' : '🧑‍⚖️ Review this reply'}
+              </button>
+              <span className="text-sm text-gray-500">
+                {reply.length} characters
+              </span>
+            </div>
+
+            {review && !review.available && (
+              <div className="mt-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 text-sm">
+                Reply review is unavailable: {review.error} Judging whether a reply is
+                accurate and appropriately worded needs the model, so no verdict is shown
+                rather than a guessed one.
+              </div>
+            )}
+
+            {review?.available && (
+              <div className="mt-4 space-y-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-600 mb-1">Supervisor Verdict</div>
+                  <div className={`inline-block px-4 py-2 rounded-lg font-semibold ${
+                    review.verdict === 'Send as is' ? 'bg-green-200 text-green-900' :
+                    review.verdict === 'Needs edits' ? 'bg-yellow-200 text-yellow-900' :
+                    'bg-red-200 text-red-900'
+                  }`}>
+                    {review.verdict}
+                  </div>
+                </div>
+
+                {review.issues.length > 0 && (
+                  <div>
+                    <div className="text-sm font-semibold text-gray-600 mb-1">
+                      Issues found ({review.issues.length})
+                    </div>
+                    <ul className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2 list-disc list-inside text-gray-800 text-sm">
+                      {review.issues.map((issue, index) => (
+                        <li key={index}>{issue}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {review.suggestedReply && (
+                  <div>
+                    <div className="text-sm font-semibold text-gray-600 mb-1">Suggested rewrite</div>
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 text-sm text-gray-800 whitespace-pre-wrap">
+                      {review.suggestedReply}
+                    </div>
+                    <button
+                      onClick={() => { setReply(review.suggestedReply); setReview(null) }}
+                      className="mt-2 text-sm bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-200 font-semibold"
+                    >
+                      Use this rewrite
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

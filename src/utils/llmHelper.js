@@ -1,5 +1,6 @@
 import Groq from 'groq-sdk';
 import { calculateUrgency } from './urgencyScorer.js';
+import { detectSupervisorRequest } from './supervisor.js';
 
 /**
  * LLM Helper for triaging customer support messages
@@ -33,7 +34,7 @@ const groq = API_KEY
 const SYSTEM_PROMPT = `You triage customer support messages for a support team.
 
 Reply with a single JSON object and nothing else, in this exact shape:
-{"category": "<one of: ${CATEGORIES.join(' | ')}>", "urgency": "<one of: ${URGENCY_LEVELS.join(' | ')}>", "reasoning": "<1-2 sentences explaining both choices>"}
+{"category": "<one of: ${CATEGORIES.join(' | ')}>", "urgency": "<one of: ${URGENCY_LEVELS.join(' | ')}>", "supervisorRequested": <true or false>, "reasoning": "<1-2 sentences explaining your choices>"}
 
 Category rules - the category describes the TOPIC, independently of how urgent it is:
 - "category" must be copied verbatim from the list above.
@@ -59,6 +60,14 @@ If one feature is broken but the rest of the product still works, that is
 Medium, not High. A question about upgrading or being charged is Low or Medium
 unless the customer says they are blocked or names a deadline.
 
+supervisorRequested rules - this is about who the customer wants to deal with,
+not how urgent the message is:
+- true when the customer asks for a supervisor, manager, someone more senior,
+  someone other than the person already helping them, or says they want to make
+  a formal complaint.
+- false otherwise. A customer who is merely angry, or who mentions their own
+  manager, is not asking for ours.
+
 Do not include markdown, code fences, or any text outside the JSON object.`;
 
 /**
@@ -69,11 +78,14 @@ Do not include markdown, code fences, or any text outside the JSON object.`;
  * rules cannot reliably detect. The rule-based scorer stays on as the fallback
  * for when the API is unavailable.
  *
+ * Also reports whether the customer asked for a supervisor, which routes the
+ * message for human review regardless of its urgency.
+ *
  * `source` and `urgencySource` tell the caller which path produced the result
  * so the UI can be honest about it.
  *
  * @param {string} message - The customer support message
- * @returns {Promise<{category: string, urgency: string, reasoning: string, source: 'llm' | 'fallback', urgencySource: 'llm' | 'rules', error?: string}>}
+ * @returns {Promise<{category: string, urgency: string, supervisorRequested: boolean, reasoning: string, source: 'llm' | 'fallback', urgencySource: 'llm' | 'rules', error?: string}>}
  */
 export async function triageMessage(message) {
   if (!groq) {
@@ -107,6 +119,9 @@ export async function triageMessage(message) {
       // rather than showing nothing.
       urgency: parsed.urgency ?? calculateUrgency(message),
       urgencySource: parsed.urgency ? 'llm' : 'rules',
+      // Same idea for the supervisor flag: fall back to the keyword check, and
+      // treat either signal as a request so we err towards human review.
+      supervisorRequested: parsed.supervisorRequested ?? detectSupervisorRequest(message),
       reasoning: parsed.reasoning,
       source: 'llm'
     };
@@ -125,6 +140,7 @@ function getFallbackTriage(message) {
     ...getMockCategorization(message),
     urgency: calculateUrgency(message),
     urgencySource: 'rules',
+    supervisorRequested: detectSupervisorRequest(message),
     source: 'fallback'
   };
 }
@@ -137,11 +153,21 @@ function getFallbackTriage(message) {
  *
  * Exported for tests.
  *
- * @returns {{category: string, urgency: string | null, reasoning: string}}
+ * @returns {{category: string, urgency: string | null, supervisorRequested: boolean | null, reasoning: string}}
  */
 export function parseTriage(content) {
   const matchAllowed = (allowed, value) =>
     allowed.find((name) => name.toLowerCase() === String(value ?? '').trim().toLowerCase()) ?? null;
+
+  // Only a real boolean (or the strings "true"/"false") counts. Anything else
+  // returns null so the caller falls back to the keyword check rather than
+  // treating a stray value as truthy.
+  const matchBoolean = (value) => {
+    if (typeof value === 'boolean') return value;
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return null;
+  };
 
   try {
     const parsed = JSON.parse(content);
@@ -150,6 +176,7 @@ export function parseTriage(content) {
       return {
         category,
         urgency: matchAllowed(URGENCY_LEVELS, parsed.urgency),
+        supervisorRequested: matchBoolean(parsed.supervisorRequested),
         reasoning: typeof parsed.reasoning === 'string' && parsed.reasoning.trim()
           ? parsed.reasoning.trim()
           : 'No reasoning provided.'
@@ -167,8 +194,126 @@ export function parseTriage(content) {
   return {
     category: exactMatch || 'Unknown',
     urgency: null,
+    supervisorRequested: null,
     reasoning: content.trim()
   };
+}
+
+export const REVIEW_VERDICTS = ['Send as is', 'Needs edits', 'Do not send'];
+
+const REVIEW_PROMPT = `You are a support supervisor reviewing a draft reply before it is sent to a customer.
+
+Reply with a single JSON object and nothing else, in this exact shape:
+{"verdict": "<one of: ${REVIEW_VERDICTS.join(' | ')}>", "issues": ["<each problem in one short sentence>"], "suggestedReply": "<an improved version of the reply, or an empty string if none is needed>"}
+
+Judge the draft on:
+- Accuracy: does it address what the customer actually asked, without inventing
+  facts, policies, refunds or timelines that were not stated?
+- Completeness: does it answer every question in the message?
+- Tone: is it respectful and appropriate to how upset the customer is, without
+  being defensive or dismissive?
+- Ownership: does it commit to a clear next step and say who will do it?
+
+Verdict rules:
+- "Do not send" if the reply would make things worse: it is rude, blames the
+  customer, promises something unsupported, or ignores the actual problem.
+- "Needs edits" if it is broadly right but incomplete, vague, or poorly worded.
+- "Send as is" if a supervisor would be happy for this to go out unchanged. Use
+  an empty issues array in that case.
+
+Do not include markdown, code fences, or any text outside the JSON object.`;
+
+/**
+ * Have the model review an agent's draft reply before it goes to the customer.
+ *
+ * There is no rule-based fallback for this: judging whether a reply is accurate
+ * and appropriately worded is not something a keyword list can do, so when the
+ * API is unavailable this reports `available: false` rather than inventing a
+ * verdict a supervisor might trust.
+ *
+ * @param {{message: string, reply: string, category?: string, urgency?: string}} input
+ * @returns {Promise<{available: boolean, verdict?: string, issues?: string[], suggestedReply?: string, error?: string}>}
+ */
+export async function reviewAgentReply({ message, reply, category, urgency }) {
+  if (!reply || !reply.trim()) {
+    return { available: false, error: 'There is no draft reply to review yet.' };
+  }
+
+  if (!groq) {
+    return {
+      available: false,
+      error: 'Reply review needs the AI service, and VITE_GROQ_API_KEY is not set.'
+    };
+  }
+
+  const context = [
+    category ? `Triaged as: ${category}` : null,
+    urgency ? `Urgency: ${urgency}` : null,
+  ].filter(Boolean).join('\n');
+
+  try {
+    const response = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: REVIEW_PROMPT },
+        {
+          role: "user",
+          content: `${context}\n\nCUSTOMER MESSAGE:\n${message}\n\nDRAFT REPLY:\n${reply}`
+        }
+      ],
+      temperature: 0,
+      max_tokens: 700,
+      response_format: { type: 'json_object' },
+    });
+
+    const content = response.choices?.[0]?.message?.content;
+    if (!content) throw new Error('Empty response from Groq');
+
+    return { available: true, ...parseReview(content) };
+  } catch (error) {
+    console.warn('Reply review failed:', error.message);
+    return { available: false, error: error.message };
+  }
+}
+
+/**
+ * Parse and validate a review reply.
+ *
+ * An unrecognised verdict becomes "Needs edits": the safe direction for a
+ * supervisor check is to ask for a human look, never to wave a reply through.
+ *
+ * Exported for tests.
+ *
+ * @returns {{verdict: string, issues: string[], suggestedReply: string}}
+ */
+export function parseReview(content) {
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return {
+      verdict: 'Needs edits',
+      issues: ['The review could not be read automatically, so it needs a human look.'],
+      suggestedReply: ''
+    };
+  }
+
+  const verdict = REVIEW_VERDICTS.find(
+    (name) => name.toLowerCase() === String(parsed.verdict ?? '').trim().toLowerCase()
+  ) ?? 'Needs edits';
+
+  const issues = Array.isArray(parsed.issues)
+    ? parsed.issues
+        .filter((issue) => typeof issue === 'string' && issue.trim())
+        .map((issue) => issue.trim())
+        .slice(0, 10)
+    : [];
+
+  const suggestedReply = typeof parsed.suggestedReply === 'string'
+    ? parsed.suggestedReply.trim()
+    : '';
+
+  return { verdict, issues, suggestedReply };
 }
 
 /**
