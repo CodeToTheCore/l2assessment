@@ -1,67 +1,171 @@
 import Groq from 'groq-sdk';
+import { calculateUrgency } from './urgencyScorer.js';
 
 /**
- * LLM Helper for categorizing customer support messages
- * Using Groq API for AI-powered categorization
+ * LLM Helper for triaging customer support messages
+ * Using Groq API for AI-powered categorization and urgency scoring
  */
 
-// Initialize Groq client
-const groq = new Groq({
-  apiKey: import.meta.env.VITE_GROQ_API_KEY,
-  dangerouslyAllowBrowser: true // Required for browser-based calls (not recommended for production!)
-});
+export const CATEGORIES = [
+  'Billing Issue',
+  'Technical Problem',
+  'Feature Request',
+  'General Inquiry',
+];
+
+export const URGENCY_LEVELS = ['High', 'Medium', 'Low'];
+
+// Optional chaining so this module can also be imported outside Vite (tests).
+const API_KEY = import.meta.env?.VITE_GROQ_API_KEY;
+
+// Only construct the client when a key is configured; otherwise we go straight
+// to the rule-based fallback instead of making a request that must fail.
+const groq = API_KEY
+  ? new Groq({
+      apiKey: API_KEY,
+      dangerouslyAllowBrowser: true // Required for browser-based calls (not recommended for production!)
+    })
+  : null;
+
+const SYSTEM_PROMPT = `You triage customer support messages for a support team.
+
+Reply with a single JSON object and nothing else, in this exact shape:
+{"category": "<one of: ${CATEGORIES.join(' | ')}>", "urgency": "<one of: ${URGENCY_LEVELS.join(' | ')}>", "reasoning": "<1-2 sentences explaining both choices>"}
+
+Category rules:
+- "category" must be copied verbatim from the list above.
+- Choose "General Inquiry" when the message is a question, feedback, or does not fit the other categories.
+
+Urgency rules - judge business impact, not tone. A polite message can be High
+and an angry message can be Low:
+- "High": the customer is blocked or cannot work, money or data is at risk,
+  a security or account-access problem, an explicit deadline, or a hint that
+  they may cancel or switch to a competitor.
+- "Medium": a real problem that has a workaround or is not blocking work, and
+  billing changes that are not urgent.
+- "Low": questions, documentation requests, feature ideas, praise, and anything
+  with no time pressure.
+
+Do not include markdown, code fences, or any text outside the JSON object.`;
 
 /**
- * Categorize a customer support message using Groq AI
- * 
+ * Triage a customer support message using Groq AI.
+ *
+ * Asks the model for the category AND the urgency in one call: urgency depends
+ * on meaning ("revenue is stopped", "our account was compromised") that keyword
+ * rules cannot reliably detect. The rule-based scorer stays on as the fallback
+ * for when the API is unavailable.
+ *
+ * `source` and `urgencySource` tell the caller which path produced the result
+ * so the UI can be honest about it.
+ *
  * @param {string} message - The customer support message
- * @returns {Promise<{category: string, reasoning: string}>}
+ * @returns {Promise<{category: string, urgency: string, reasoning: string, source: 'llm' | 'fallback', urgencySource: 'llm' | 'rules', error?: string}>}
  */
-export async function categorizeMessage(message) {
+export async function triageMessage(message) {
+  if (!groq) {
+    return {
+      ...getFallbackTriage(message),
+      error: 'VITE_GROQ_API_KEY is not set.'
+    };
+  }
+
   try {
     const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [
-        {
-          role: "user",
-          content: `Categorize this customer support message: ${message}`
-        }
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: message }
       ],
-      temperature: 0.7,
+      // Classification should be repeatable, so no sampling randomness.
+      temperature: 0,
+      max_tokens: 300,
+      response_format: { type: 'json_object' },
     });
 
-    const content = response.choices[0].message.content;
-    
-    const lines = content.split('\n');
-    let category = "Unknown";
-    let reasoning = content;
-    
-    if (content.toLowerCase().includes('billing')) {
-      category = "Billing Issue";
-    } else if (content.toLowerCase().includes('technical') || content.toLowerCase().includes('bug')) {
-      category = "Technical Problem";
-    } else if (content.toLowerCase().includes('feature')) {
-      category = "Feature Request";
-    } else if (content.toLowerCase().includes('inquiry') || content.toLowerCase().includes('question')) {
-      category = "General Inquiry";
-    }
-    
+    const content = response.choices?.[0]?.message?.content;
+    if (!content) throw new Error('Empty response from Groq');
+
+    const parsed = parseTriage(content);
+
     return {
-      category,
-      reasoning: content
+      category: parsed.category,
+      // If the model omitted or mangled the urgency, score it with the rules
+      // rather than showing nothing.
+      urgency: parsed.urgency ?? calculateUrgency(message),
+      urgencySource: parsed.urgency ? 'llm' : 'rules',
+      reasoning: parsed.reasoning,
+      source: 'llm'
     };
   } catch (error) {
-    console.warn('Groq API failed, using mock response:', error.message);
-    return getMockCategorization(message);
+    console.warn('Groq API failed, using rule-based fallback:', error.message);
+    return {
+      ...getFallbackTriage(message),
+      error: error.message
+    };
   }
 }
 
+/** Rule-based triage used whenever the LLM path is unavailable. */
+function getFallbackTriage(message) {
+  return {
+    ...getMockCategorization(message),
+    urgency: calculateUrgency(message),
+    urgencySource: 'rules',
+    source: 'fallback'
+  };
+}
+
 /**
- * Mock categorization for when API is unavailable
+ * Parse the model's JSON reply and validate each field against the allowed values.
+ *
+ * Matching on the declared fields (rather than scanning prose for keywords)
+ * avoids misreading replies like "this is not a billing issue".
+ *
+ * Exported for tests.
+ *
+ * @returns {{category: string, urgency: string | null, reasoning: string}}
+ */
+export function parseTriage(content) {
+  const matchAllowed = (allowed, value) =>
+    allowed.find((name) => name.toLowerCase() === String(value ?? '').trim().toLowerCase()) ?? null;
+
+  try {
+    const parsed = JSON.parse(content);
+    const category = matchAllowed(CATEGORIES, parsed.category);
+    if (category) {
+      return {
+        category,
+        urgency: matchAllowed(URGENCY_LEVELS, parsed.urgency),
+        reasoning: typeof parsed.reasoning === 'string' && parsed.reasoning.trim()
+          ? parsed.reasoning.trim()
+          : 'No reasoning provided.'
+      };
+    }
+  } catch {
+    // Not valid JSON - fall through to the exact-name scan below.
+  }
+
+  // Last resort: look for an exact category name in the raw reply.
+  const exactMatch = CATEGORIES.find((name) =>
+    content.toLowerCase().includes(name.toLowerCase())
+  );
+
+  return {
+    category: exactMatch || 'Unknown',
+    urgency: null,
+    reasoning: content.trim()
+  };
+}
+
+/**
+ * Rule-based categorization for when the API is unavailable.
+ *
+ * Deterministic: the same message always yields the same category and wording.
  */
 function getMockCategorization(message) {
   const lowerMessage = message.toLowerCase();
-  
+
   // Array of possible reasoning variations for each category
   const reasoningVariations = {
     billing: [
@@ -94,72 +198,79 @@ function getMockCategorization(message) {
       "This message doesn't contain clear indicators for automatic categorization. Human review recommended.",
     ]
   };
-  
-  // Helper to get random reasoning
-  const getRandomReasoning = (category) => {
+
+  // Pick a variation from a stable hash of the message so a re-analysis of the
+  // same text produces the same explanation.
+  const getReasoning = (category) => {
     const reasons = reasoningVariations[category];
-    return reasons[Math.floor(Math.random() * reasons.length)];
+    let hash = 0;
+    for (let i = 0; i < message.length; i++) {
+      hash = (hash + message.charCodeAt(i)) % 997;
+    }
+    return reasons[hash % reasons.length];
   };
-  
+
   // Billing-related detection
-  if (lowerMessage.includes('bill') || lowerMessage.includes('payment') || 
+  if (lowerMessage.includes('bill') || lowerMessage.includes('payment') ||
       lowerMessage.includes('charge') || lowerMessage.includes('invoice') ||
       lowerMessage.includes('credit card') || lowerMessage.includes('subscription') ||
-      lowerMessage.includes('refund') || lowerMessage.includes('cancel') && lowerMessage.includes('account')) {
+      lowerMessage.includes('refund') ||
+      (lowerMessage.includes('cancel') && lowerMessage.includes('account'))) {
     return {
       category: "Billing Issue",
-      reasoning: getRandomReasoning('billing')
+      reasoning: getReasoning('billing')
     };
   }
-  
+
   // Technical problem detection
-  if (lowerMessage.includes('bug') || lowerMessage.includes('error') || 
+  if (lowerMessage.includes('bug') || lowerMessage.includes('error') ||
       lowerMessage.includes('broken') || lowerMessage.includes('not working') ||
-      lowerMessage.includes('crash') || lowerMessage.includes('down') || 
+      lowerMessage.includes('crash') || lowerMessage.includes('down') ||
       lowerMessage.includes('server') || lowerMessage.includes('loading') ||
       lowerMessage.includes('slow') || lowerMessage.includes('issue') ||
-      lowerMessage.includes('problem') && !lowerMessage.includes('no problem')) {
+      (lowerMessage.includes('problem') && !lowerMessage.includes('no problem'))) {
     return {
       category: "Technical Problem",
-      reasoning: getRandomReasoning('technical')
+      reasoning: getReasoning('technical')
     };
   }
-  
+
   // Feature request detection
-  if (lowerMessage.includes('feature') || lowerMessage.includes('add') && (lowerMessage.includes('please') || lowerMessage.includes('could')) ||
-      lowerMessage.includes('improve') || lowerMessage.includes('would like to see') ||
-      lowerMessage.includes('suggestion') || lowerMessage.includes('wish') ||
-      lowerMessage.includes('could you') && lowerMessage.includes('add') ||
-      lowerMessage.includes('enhancement') || lowerMessage.includes('would be great')) {
+  if (lowerMessage.includes('feature') || lowerMessage.includes('improve') ||
+      lowerMessage.includes('would like to see') || lowerMessage.includes('suggestion') ||
+      lowerMessage.includes('wish') || lowerMessage.includes('enhancement') ||
+      lowerMessage.includes('would be great') ||
+      (lowerMessage.includes('add') &&
+        (lowerMessage.includes('please') || lowerMessage.includes('could')))) {
     return {
       category: "Feature Request",
-      reasoning: getRandomReasoning('feature')
+      reasoning: getReasoning('feature')
     };
   }
-  
+
   // Positive feedback detection
   if ((lowerMessage.includes('thank') || lowerMessage.includes('thanks') || lowerMessage.includes('appreciate')) &&
       !lowerMessage.includes('but') && !lowerMessage.includes('however')) {
     return {
       category: "General Inquiry",
-      reasoning: getRandomReasoning('positive')
+      reasoning: getReasoning('positive')
     };
   }
-  
+
   // Question/inquiry detection
-  if (lowerMessage.includes('how') || lowerMessage.includes('what') || 
+  if (lowerMessage.includes('how') || lowerMessage.includes('what') ||
       lowerMessage.includes('when') || lowerMessage.includes('where') ||
       lowerMessage.includes('can i') || lowerMessage.includes('is there') ||
       lowerMessage.includes('?')) {
     return {
       category: "General Inquiry",
-      reasoning: getRandomReasoning('inquiry')
+      reasoning: getReasoning('inquiry')
     };
   }
-  
+
   // Fallback for ambiguous messages
   return {
     category: "General Inquiry",
-    reasoning: getRandomReasoning('ambiguous')
+    reasoning: getReasoning('ambiguous')
   };
 }

@@ -1,51 +1,61 @@
-import { useState, useEffect } from 'react'
+import { useMemo } from 'react'
+import { readHistory } from '../utils/storage'
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+
+/** Calendar days covered by the history, inclusive (minimum 1). */
+function daysCovered(history) {
+  if (history.length === 0) return 1
+
+  const times = history.map((item) => new Date(item.timestamp).getTime())
+  const first = new Date(Math.min(...times))
+  const last = new Date(Math.max(...times))
+  first.setHours(0, 0, 0, 0)
+  last.setHours(0, 0, 0, 0)
+
+  return Math.round((last - first) / MS_PER_DAY) + 1
+}
 
 function DashboardPage() {
-  const [stats, setStats] = useState({
-    total: 0,
-    today: 0,
-    highUrgencyPercent: 0,
-    avgPerDay: 0
-  })
-  const [categoryData, setCategoryData] = useState([])
-  const [urgencyData, setUrgencyData] = useState({ High: 0, Medium: 0, Low: 0 })
+  const history = useMemo(() => readHistory(), [])
 
-  useEffect(() => {
-    loadDashboardData()
-  }, [])
-
-  const loadDashboardData = () => {
-    const history = JSON.parse(localStorage.getItem('triageHistory') || '[]')
+  const stats = useMemo(() => {
     const today = new Date().toDateString()
-    const todayMessages = history.filter(item => 
-      new Date(item.timestamp).toDateString() === today
+    const todayMessages = history.filter(
+      (item) => new Date(item.timestamp).toDateString() === today
     )
+    const highUrgency = history.filter((h) => h.urgency === 'High').length
 
-    // Calculate stats
-    const highUrgency = history.filter(h => h.urgency === 'High').length
-    const totalDays = history.length > 0 ? 7 : 1
-    
-    setStats({
+    return {
       total: history.length,
       today: todayMessages.length,
-      highUrgencyPercent: history.length > 0 ? Math.round((highUrgency / history.length) * 100) : 0,
-      avgPerDay: Math.round(history.length / totalDays)
-    })
+      highUrgencyPercent: history.length > 0
+        ? Math.round((highUrgency / history.length) * 100)
+        : 0,
+      // Averaged over the days actually covered by the data, not a fixed window.
+      avgPerDay: history.length > 0
+        ? (history.length / daysCovered(history)).toFixed(1)
+        : '0'
+    }
+  }, [history])
 
-    // Category distribution
+  const categoryData = useMemo(() => {
     const categories = {}
-    history.forEach(item => {
+    history.forEach((item) => {
       categories[item.category] = (categories[item.category] || 0) + 1
     })
-    setCategoryData(Object.entries(categories).map(([name, count]) => ({ name, count })))
+    return Object.entries(categories)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+  }, [history])
 
-    // Urgency breakdown
+  const urgencyData = useMemo(() => {
     const urgency = { High: 0, Medium: 0, Low: 0 }
-    history.forEach(item => {
-      urgency[item.urgency] = (urgency[item.urgency] || 0) + 1
+    history.forEach((item) => {
+      if (item.urgency in urgency) urgency[item.urgency] += 1
     })
-    setUrgencyData(urgency)
-  }
+    return urgency
+  }, [history])
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
@@ -92,7 +102,7 @@ function DashboardPage() {
                         <span className="text-gray-600">{cat.count} ({percentage.toFixed(0)}%)</span>
                       </div>
                       <div className="w-full bg-gray-200 rounded-full h-2">
-                        <div 
+                        <div
                           className="bg-blue-500 h-2 rounded-full"
                           style={{ width: `${percentage}%` }}
                         />

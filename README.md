@@ -1,5 +1,23 @@
 # Customer Inbox Triage App
 
+## Changes in this fork
+
+**See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the full assessment write-up** — how I
+tested, the top 3 areas for improvement, what I implemented and why, and before/after
+measurements.
+
+Short version:
+
+- **Urgency is now scored by the LLM** in the same call as the category, because a
+  keyword list cannot read business impact. The rule-based scorer was rewritten and
+  demoted to a fallback.
+- **The LLM contract is validated** — JSON mode, `temperature: 0`, and both fields
+  checked against allow-lists instead of keyword-scanning the reply prose.
+- **Failures are visible.** The app now says when a result came from the fallback rules
+  rather than the model, instead of labelling everything "AI Reasoning".
+- **Recommendations use category *and* urgency**, and each category has its own action.
+- **Guarded storage layer, 22 unit tests, `.env` added to `.gitignore`.**
+
 ## Overview
 
 The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to categorize messages, applies rule-based urgency scoring, and suggests next steps based on predefined templates.
@@ -58,15 +76,29 @@ Support teams waste time manually reading and triaging customer messages. This t
    
    The app will be available at `http://localhost:5173`
 
+5. **Run the checks** (optional)
+   ```bash
+   npm test        # 22 unit tests, no extra dependencies (node --test)
+   npm run lint
+   npm run build
+   ```
+
+> **Note:** if `VITE_GROQ_API_KEY` is missing or invalid, the app still works — it falls
+> back to rule-based triage and labels the results as rule-scored rather than AI-scored.
+
 ## How It Works
 
 1. **Paste Message**: User pastes a customer support message into the text area
 2. **Analyze**: Click "Analyze Message" to process the input
-3. **Classification**: The app runs three processes in parallel:
-   - **Category Classification** (LLM): Uses Groq AI (Llama 3.3 70B) to categorize the message
-   - **Urgency Scoring** (Rule-based): Applies simple rules to determine urgency
-   - **Recommendation** (Template-based): Maps category to a recommended action
-4. **Display Results**: Shows category, urgency tag, recommended action, and AI reasoning
+3. **Triage**: The app then runs:
+   - **Category + Urgency** (LLM): One structured Groq call (Llama 3.3 70B) returns both,
+     validated against fixed allow-lists
+   - **Urgency fallback** (Rule-based): A deterministic keyword scorer, used only when the
+     LLM is unavailable or returns an unusable urgency
+   - **Recommendation** (Template-based): Maps category *and* urgency to a recommended
+     action, escalating where warranted
+4. **Display Results**: Shows category, urgency tag (marked AI-scored or rule-scored),
+   recommended action, and the reasoning behind it
 5. **History**: All analyses are saved to localStorage and viewable in the History tab
 
 

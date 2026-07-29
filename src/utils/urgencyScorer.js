@@ -1,41 +1,105 @@
 /**
  * Urgency Scorer - Rule-based urgency calculation
+ *
+ * Scores a message 0-100 from signals in the text itself. The result is
+ * deterministic: the same message always produces the same urgency, so stored
+ * history stays reproducible.
  */
 
+// Signals that a customer is blocked or losing money right now. Any single one
+// of these is enough on its own to reach High.
+const CRITICAL_SIGNALS = [
+  'outage', 'is down', 'are down', 'went down', 'downtime',
+  'data loss', 'lost data', 'breach', 'hacked', 'fraud',
+  'cannot access', "can't access", 'cant access', 'locked out', 'no access',
+  'longer access', 'lost access', 'access denied', 'denied access',
+  'double charged', 'charged twice', 'overcharged',
+]
+
+// Explicit urgency language and hard failures.
+const HIGH_SIGNALS = [
+  'urgent', 'urgently', 'asap', 'immediately', 'emergency', 'critical',
+  'broken', 'not working', "doesn't work", 'does not work', 'failed',
+  'failing', 'crash', 'blocked', 'blocker', 'escalate', 'unacceptable',
+  'deadline', 'right now', 'losing customers', 'losing money',
+  'production', 'security',
+]
+
+// Real problems that are not emergencies.
+const MEDIUM_SIGNALS = [
+  'error', 'bug', 'issue', 'problem', 'slow', 'refund',
+  'cancel', 'invoice', 'billing', 'payment', 'charge', 'confused',
+  'unable', 'stuck', 'wrong',
+  'timeout', 'timing out', 'timed out',
+  "won't load", 'wont load', 'will not load', 'loading forever', 'keeps loading',
+]
+
+const POLITE_WORDS = ['please', 'thank', 'thanks', 'appreciate', 'kindly']
+const POSITIVE_WORDS = ['happy', 'love', 'great', 'excellent', 'wonderful']
+
+const BASE_SCORE = 30
+const HIGH_THRESHOLD = 70
+const MEDIUM_THRESHOLD = 35
+
+/** Count how many distinct phrases from `signals` appear in `text`. */
+function countSignals(text, signals) {
+  return signals.filter((signal) => text.includes(signal)).length
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+/**
+ * Compute the raw 0-100 urgency score for a message.
+ *
+ * @param {string} message
+ * @returns {number}
+ */
+function scoreUrgency(message) {
+  const text = message.toLowerCase()
+  let score = BASE_SCORE
+
+  // Content signals, each group capped so one repetitive message can't dominate.
+  const criticalHits = countSignals(text, CRITICAL_SIGNALS)
+  const highHits = countSignals(text, HIGH_SIGNALS)
+  const mediumHits = countSignals(text, MEDIUM_SIGNALS)
+
+  score += Math.min(criticalHits * 40, 60)
+  score += Math.min(highHits * 15, 45)
+  score += Math.min(mediumHits * 10, 30)
+
+  // Emphasis: shouting and exclamation marks raise urgency, they don't lower it.
+  const exclamations = (message.match(/!/g) || []).length
+  score += Math.min(exclamations, 3) * 4
+  const hasLetters = /[a-z]/i.test(message)
+  if (hasLetters && message.length > 10 && message === message.toUpperCase()) {
+    score += 10
+  }
+
+  // Tone only softens genuinely ambiguous messages. A polite customer reporting
+  // an outage is still reporting an outage, so skip these when a critical or
+  // high signal is present.
+  if (criticalHits === 0 && highHits === 0) {
+    score -= Math.min(countSignals(text, POLITE_WORDS) * 3, 6)
+    if (message.includes('?')) score -= 5
+    if (countSignals(text, POSITIVE_WORDS) > 0) score -= 10
+  }
+
+  return clamp(score, 0, 100)
+}
+
+/**
+ * Classify a message's urgency.
+ *
+ * @param {string} message - The customer support message
+ * @returns {"High" | "Medium" | "Low"}
+ */
 export function calculateUrgency(message) {
-  let urgencyScore = 50
-  
-  const exclamationCount = (message.match(/!/g) || []).length
-  urgencyScore += exclamationCount * 30
-  
-  if (message.length < 50) urgencyScore -= 40
-  if (message.length < 20) urgencyScore -= 60
-  
-  if (message === message.toUpperCase() && message.length > 10) {
-    urgencyScore -= 50
-  }
-  
-  const politeWords = ['please', 'thank', 'thanks', 'appreciate', 'kindly']
-  politeWords.forEach(word => {
-    if (message.toLowerCase().includes(word)) urgencyScore -= 15
-  })
-  
-  if (message.includes('?')) urgencyScore -= 25
-  
-  const now = new Date()
-  if (now.getDay() === 0 || now.getDay() === 6) {
-    urgencyScore -= 20
-  }
-  if (now.getHours() < 9 || now.getHours() > 17) {
-    urgencyScore -= 15
-  }
-  
-  const positiveWords = ['happy', 'love', 'great', 'excellent', 'wonderful']
-  positiveWords.forEach(word => {
-    if (message.toLowerCase().includes(word)) urgencyScore -= 20
-  })
-  
-  if (urgencyScore > 80) return "High"
-  if (urgencyScore < 30) return "Low"
-  return "Medium"
+  if (!message || !message.trim()) return 'Low'
+
+  const score = scoreUrgency(message)
+  if (score >= HIGH_THRESHOLD) return 'High'
+  if (score >= MEDIUM_THRESHOLD) return 'Medium'
+  return 'Low'
 }

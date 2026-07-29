@@ -1,36 +1,39 @@
-import { useState, useEffect } from 'react'
+import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import { clearHistory, readHistory, truncate } from '../utils/storage'
+
+/** Stable identity for an entry, tolerating older records saved without an id. */
+function entryKey(item, index) {
+  return item.id ?? `${item.timestamp}-${index}`
+}
 
 function HistoryPage() {
-  const [history, setHistory] = useState([])
+  const [history, setHistory] = useState(readHistory)
   const [filter, setFilter] = useState('all')
-  const [expandedIndex, setExpandedIndex] = useState(null)
+  const [expandedKey, setExpandedKey] = useState(null)
 
-  useEffect(() => {
-    loadHistory()
-  }, [])
-
-  const loadHistory = () => {
-    const savedHistory = JSON.parse(localStorage.getItem('triageHistory') || '[]')
-    setHistory(savedHistory)
-  }
-
-  const clearHistory = () => {
+  const handleClearAll = () => {
     if (window.confirm('Are you sure you want to clear all history?')) {
-      localStorage.setItem('triageHistory', '[]')
+      clearHistory()
       setHistory([])
+      setExpandedKey(null)
     }
   }
 
-  const sortedHistory = [...history].sort((a, b) => 
-    a.message.localeCompare(b.message)
+  // Newest first - this is a triage queue, not an alphabetical index.
+  const sortedHistory = useMemo(
+    () => [...history]
+      .map((item, index) => ({ item, key: entryKey(item, index) }))
+      .sort((a, b) => new Date(b.item.timestamp) - new Date(a.item.timestamp)),
+    [history]
   )
-  
-  const filteredHistory = filter === 'all' 
-    ? sortedHistory 
-    : sortedHistory.filter(item => item.category === filter)
 
-  const categories = [...new Set(history.map(item => item.category))]
+  const filteredHistory = filter === 'all'
+    ? sortedHistory
+    : sortedHistory.filter(({ item }) => item.category === filter)
+
+  const categories = [...new Set(history.map((item) => item.category))]
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
@@ -43,7 +46,7 @@ function HistoryPage() {
             </div>
             {history.length > 0 && (
               <button
-                onClick={clearHistory}
+                onClick={handleClearAll}
                 className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 font-semibold"
               >
                 Clear All
@@ -89,24 +92,24 @@ function HistoryPage() {
             <p className="text-gray-500 mb-6">
               Analyzed messages will appear here
             </p>
-            <a
-              href="/analyze"
+            <Link
+              to="/analyze"
               className="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 font-semibold"
             >
               Analyze a Message
-            </a>
+            </Link>
           </div>
         )}
 
         <div className="space-y-4">
-          {filteredHistory.map((item, index) => (
+          {filteredHistory.map(({ item, key }) => (
             <div
-              key={index}
+              key={key}
               className="bg-white rounded-lg shadow-md overflow-hidden"
             >
               <div
                 className="p-4 cursor-pointer hover:bg-gray-50"
-                onClick={() => setExpandedIndex(expandedIndex === index ? null : index)}
+                onClick={() => setExpandedKey(expandedKey === key ? null : key)}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
@@ -114,7 +117,7 @@ function HistoryPage() {
                       {new Date(item.timestamp).toLocaleString()}
                     </div>
                     <div className="text-gray-800 font-medium mb-2">
-                      "{item.message.substring(0, 100)}{item.message.length > 100 ? '...' : ''}"
+                      "{truncate(item.message, 100)}"
                     </div>
                     <div className="flex items-center space-x-2">
                       <span className="text-xs bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-semibold">
@@ -127,15 +130,20 @@ function HistoryPage() {
                       }`}>
                         {item.urgency} Urgency
                       </span>
+                      {item.source === 'fallback' && (
+                        <span className="text-xs bg-amber-100 text-amber-900 px-3 py-1 rounded-full font-semibold">
+                          Rule-based
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="text-gray-400 ml-4">
-                    {expandedIndex === index ? '▲' : '▼'}
+                    {expandedKey === key ? '▲' : '▼'}
                   </div>
                 </div>
               </div>
 
-              {expandedIndex === index && (
+              {expandedKey === key && (
                 <div className="border-t border-gray-200 p-4 bg-gray-50">
                   <div className="space-y-3">
                     <div>
@@ -151,7 +159,9 @@ function HistoryPage() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-xs font-semibold text-gray-600 mb-1">AI Reasoning</div>
+                      <div className="text-xs font-semibold text-gray-600 mb-1">
+                        {item.source === 'fallback' ? 'Rule-Based Reasoning' : 'AI Reasoning'}
+                      </div>
                       <div className="bg-white p-3 rounded border border-gray-200">
                         <div className="prose prose-sm max-w-none text-gray-700">
                           <ReactMarkdown>

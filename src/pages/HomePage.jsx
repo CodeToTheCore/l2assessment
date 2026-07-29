@@ -1,26 +1,29 @@
-import { Link } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { useMemo } from 'react'
+import { readHistory, truncate } from '../utils/storage'
+
+const EXAMPLE_MESSAGES = [
+  "Our payment failed and we can't access our account",
+  "The dashboard is loading very slowly",
+  "Can you add a dark mode feature?"
+]
 
 function HomePage() {
-  const [stats, setStats] = useState({ total: 0, today: 0 })
-  const [recentActivity, setRecentActivity] = useState([])
+  const navigate = useNavigate()
 
-  useEffect(() => {
-    // Load stats from localStorage
-    const history = JSON.parse(localStorage.getItem('triageHistory') || '[]')
-    const today = new Date().toDateString()
-    const todayCount = history.filter(item => 
-      new Date(item.timestamp).toDateString() === today
-    ).length
+  // Read once per mount and derive everything from it - no effect, no cascading renders.
+  const history = useMemo(() => readHistory(), [])
 
-    setStats({
-      total: history.length,
-      today: todayCount
-    })
+  const today = new Date().toDateString()
+  const todayCount = history.filter(
+    (item) => new Date(item.timestamp).toDateString() === today
+  ).length
+  const recentActivity = history.slice(-3).reverse()
 
-    // Get recent 3 items
-    setRecentActivity(history.slice(-3).reverse())
-  }, [])
+  const tryExample = () => {
+    const message = EXAMPLE_MESSAGES[Math.floor(Math.random() * EXAMPLE_MESSAGES.length)]
+    navigate('/analyze', { state: { message } })
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
@@ -34,9 +37,9 @@ function HomePage() {
             AI-powered message categorization and routing for customer support teams
           </p>
           <p className="text-gray-700">
-            Relay AI is a subscription-based customer operations platform that uses AI to categorize, 
-            prioritize, and route incoming customer messages for small businesses. Our SaaS model is 
-            built around boosting team efficiency and enabling companies to handle more customer 
+            Relay AI is a subscription-based customer operations platform that uses AI to categorize,
+            prioritize, and route incoming customer messages for small businesses. Our SaaS model is
+            built around boosting team efficiency and enabling companies to handle more customer
             volume without hiring additional support staff.
           </p>
         </div>
@@ -44,11 +47,11 @@ function HomePage() {
         {/* Stats Cards */}
         <div className="grid grid-cols-2 gap-4 mb-6">
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-            <div className="text-3xl font-bold text-blue-600">{stats.total}</div>
+            <div className="text-3xl font-bold text-blue-600">{history.length}</div>
             <div className="text-sm text-gray-600">Total Messages Analyzed</div>
           </div>
           <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-            <div className="text-3xl font-bold text-green-600">{stats.today}</div>
+            <div className="text-3xl font-bold text-green-600">{todayCount}</div>
             <div className="text-sm text-gray-600">Analyzed Today</div>
           </div>
         </div>
@@ -74,17 +77,8 @@ function HomePage() {
           </Link>
 
           <button
-            onClick={() => {
-              const examples = [
-                "Our payment failed and we can't access our account",
-                "The dashboard is loading very slowly",
-                "Can you add a dark mode feature?"
-              ]
-              const random = examples[Math.floor(Math.random() * examples.length)]
-              localStorage.setItem('exampleMessage', random)
-              window.location.href = '/analyze'
-            }}
-            className="bg-orange-600 text-white rounded-lg p-6 hover:bg-orange-700 transition"
+            onClick={tryExample}
+            className="bg-orange-600 text-white rounded-lg p-6 hover:bg-orange-700 transition text-left"
           >
             <div className="text-2xl mb-2">🎯</div>
             <div className="font-semibold mb-1">Try Example</div>
@@ -98,14 +92,14 @@ function HomePage() {
             <h2 className="text-xl font-bold text-gray-900 mb-4">Recent Activity</h2>
             <div className="space-y-3">
               {recentActivity.map((item, index) => (
-                <div key={index} className="border-l-4 border-blue-500 pl-4 py-2">
+                <div key={item.id ?? `${item.timestamp}-${index}`} className="border-l-4 border-blue-500 pl-4 py-2">
                   <div className="flex items-center justify-between">
                     <div className="flex-1">
                       <div className="text-sm text-gray-500">
                         {new Date(item.timestamp).toLocaleString()}
                       </div>
                       <div className="text-gray-700 truncate">
-                        "{item.message.substring(0, 60)}..."
+                        "{truncate(item.message, 60)}"
                       </div>
                       <div className="flex items-center space-x-2 mt-1">
                         <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">

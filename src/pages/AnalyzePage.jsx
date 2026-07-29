@@ -1,60 +1,59 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
-import { categorizeMessage } from '../utils/llmHelper'
-import { calculateUrgency } from '../utils/urgencyScorer'
+import { triageMessage } from '../utils/llmHelper'
 import { getRecommendedAction } from '../utils/templates'
+import { appendHistory, createAnalysisId } from '../utils/storage'
 
 function AnalyzePage() {
-  const [message, setMessage] = useState('')
+  const location = useLocation()
+  // An example message handed over from the home page arrives as router state.
+  const [message, setMessage] = useState(() => location.state?.message ?? '')
   const [results, setResults] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
-
-  useEffect(() => {
-    // Check for example message from home page
-    const exampleMessage = localStorage.getItem('exampleMessage')
-    if (exampleMessage) {
-      setMessage(exampleMessage)
-      localStorage.removeItem('exampleMessage')
-    }
-  }, [])
+  const [error, setError] = useState(null)
+  const [copied, setCopied] = useState(false)
 
   const handleAnalyze = async () => {
     if (!message.trim()) {
-      alert('Please enter a message to analyze')
+      setError('Please enter a message to analyze.')
       return
     }
 
     setIsLoading(true)
     setResults(null)
-    
+    setError(null)
+    setCopied(false)
+
     try {
-      // Run categorization (LLM call)
-      const { category, reasoning } = await categorizeMessage(message)
-      
-      // Calculate urgency (rule-based)
-      const urgency = calculateUrgency(message)
-      
+      // Category + urgency come from one LLM call, with a rule-based fallback
+      const { category, urgency, reasoning, source, urgencySource } =
+        await triageMessage(message)
+
       // Get recommended action (template-based)
-      const recommendedAction = getRecommendedAction(category)
-      
+      const recommendedAction = getRecommendedAction(category, urgency)
+
       const analysisResult = {
+        id: createAnalysisId(),
         message,
         category,
         urgency,
         recommendedAction,
         reasoning,
+        source,
+        urgencySource,
         timestamp: new Date().toISOString()
       }
 
       setResults(analysisResult)
 
       // Save to history
-      const history = JSON.parse(localStorage.getItem('triageHistory') || '[]')
-      history.push(analysisResult)
-      localStorage.setItem('triageHistory', JSON.stringify(history))
-    } catch (error) {
-      console.error('Error analyzing message:', error)
-      alert('Error analyzing message. Please try again.')
+      if (!appendHistory(analysisResult)) {
+        setError('This analysis could not be saved to history (browser storage is full).')
+      }
+    } catch (err) {
+      console.error('Error analyzing message:', err)
+      setError('Error analyzing message. Please try again.')
     } finally {
       setIsLoading(false)
     }
@@ -63,6 +62,19 @@ function AnalyzePage() {
   const handleClear = () => {
     setMessage('')
     setResults(null)
+    setError(null)
+    setCopied(false)
+  }
+
+  const handleCopy = async () => {
+    const text = `Category: ${results.category}\nUrgency: ${results.urgency}\nRecommendation: ${results.recommendedAction}\n\nReasoning: ${results.reasoning}`
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+    } catch (err) {
+      console.error('Clipboard write failed:', err)
+      setError('Could not copy to clipboard.')
+    }
   }
 
   return (
@@ -76,10 +88,11 @@ function AnalyzePage() {
 
           {/* Input Section */}
           <div className="mb-4">
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
+            <label htmlFor="customer-message" className="block text-sm font-semibold text-gray-700 mb-2">
               Customer Message
             </label>
             <textarea
+              id="customer-message"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               placeholder="Paste customer message here..."
@@ -90,6 +103,12 @@ function AnalyzePage() {
               {message.length} characters
             </div>
           </div>
+
+          {error && (
+            <div className="mb-4 bg-red-50 border border-red-200 text-red-800 rounded-lg p-3 text-sm">
+              {error}
+            </div>
+          )}
 
           {/* Action Buttons */}
           <div className="flex space-x-3">
@@ -128,7 +147,14 @@ function AnalyzePage() {
         {results && (
           <div className="bg-white rounded-lg shadow-md p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Analysis Results</h2>
-            
+
+            {results.source === 'fallback' && (
+              <div className="mb-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 text-sm">
+                The AI service was unavailable, so this was categorized by the built-in
+                rules instead. Check that <code>VITE_GROQ_API_KEY</code> is set.
+              </div>
+            )}
+
             <div className="space-y-4">
               <div>
                 <div className="text-sm font-semibold text-gray-600 mb-1">Category</div>
@@ -138,7 +164,12 @@ function AnalyzePage() {
               </div>
 
               <div>
-                <div className="text-sm font-semibold text-gray-600 mb-1">Urgency Level</div>
+                <div className="text-sm font-semibold text-gray-600 mb-1">
+                  Urgency Level
+                  <span className="ml-2 font-normal text-gray-500">
+                    ({results.urgencySource === 'llm' ? 'AI-scored' : 'rule-scored'})
+                  </span>
+                </div>
                 <div className={`inline-block px-4 py-2 rounded-lg font-semibold ${
                   results.urgency === 'High' ? 'bg-red-200 text-red-900' :
                   results.urgency === 'Medium' ? 'bg-yellow-200 text-yellow-900' :
@@ -156,7 +187,9 @@ function AnalyzePage() {
               </div>
 
               <div>
-                <div className="text-sm font-semibold text-gray-600 mb-1">AI Reasoning</div>
+                <div className="text-sm font-semibold text-gray-600 mb-1">
+                  {results.source === 'fallback' ? 'Rule-Based Reasoning' : 'AI Reasoning'}
+                </div>
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                   <div className="prose prose-sm max-w-none text-gray-700">
                     <ReactMarkdown>
@@ -167,17 +200,16 @@ function AnalyzePage() {
               </div>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-gray-200">
+            <div className="mt-6 pt-4 border-t border-gray-200 flex items-center space-x-3">
               <button
-                onClick={() => {
-                  const text = `Category: ${results.category}\nUrgency: ${results.urgency}\nRecommendation: ${results.recommendedAction}\n\nReasoning: ${results.reasoning}`
-                  navigator.clipboard.writeText(text)
-                  alert('Results copied to clipboard!')
-                }}
+                onClick={handleCopy}
                 className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 font-semibold"
               >
                 📋 Copy Results
               </button>
+              {copied && (
+                <span className="text-sm text-green-700 font-semibold">Copied to clipboard</span>
+              )}
             </div>
           </div>
         )}
