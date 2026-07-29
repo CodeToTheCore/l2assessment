@@ -67,16 +67,37 @@ Features the original app had no notion of, covered in
   alone does not escalate**: being upset is not being blocked, and letting tone drive routing
   rewards whoever shouts loudest. It changes how you open the reply, not where it goes.
 
-Two findings came from measurement rather than reading the code, and both are written up
-in [IMPROVEMENTS.md](IMPROVEMENTS.md): a rewritten keyword scorer that hit **12/12** on
-the messages I tuned it against and **2/8** on held-out messages (which is why urgency
-moved to the LLM), and an escalation rule of my own that passed its unit tests and then
-turned *"Can I upgrade to the pro plan?"* into *"Escalate to a senior agent within 1
-hour"* against the live API.
+### Findings that came from measurement, not from reading the code
+
+All four are written up in [IMPROVEMENTS.md](IMPROVEMENTS.md):
+
+- A rewritten keyword scorer hit **12/12** on the messages I tuned it against and **2/8** on
+  held-out messages written afterwards. That gap is why urgency moved to the LLM.
+- An escalation rule of my own passed its unit tests, then turned *"Can I upgrade to the pro
+  plan?"* into *"Escalate to a senior agent within 1 hour"* against the live API.
+- Since category and urgency now come from one call, I tested adversarially for the model
+  correlating them (assuming Billing means Low). It doesn't: **urgency 6/6** on pairs built
+  against the stereotype — billing P1s scored High, a cosmetic technical bug scored Low. One
+  of the two category disagreements was **my** label being wrong, not the model's.
+- `temperature: 0` makes sampling greedy but does **not** guarantee bit-identical output —
+  provider-side batching and hardware can still cause drift. Three repeat calls is evidence,
+  not proof; a real stability claim needs the evaluation harness in section 5. This is part of
+  why allow-list validation matters: it bounds what a drifting reply can turn into.
 
 ## Overview
 
-The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to assign both a category and an urgency level in a single structured call, falls back to rule-based urgency scoring when the API is unavailable, and suggests next steps from templates keyed on both values.
+The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to assign a category, an urgency level and a supervisor-requested flag in a single structured call, measures customer aggravation separately with rules, and combines the two into an escalation decision and a recommended next step. When the API is unavailable it falls back to rule-based scoring and says so rather than presenting the result as AI output.
+
+Concerns are deliberately separated into layers, each answering one question:
+
+| Layer | Module | Question | Uses the LLM? |
+|---|---|---|---|
+| 1. Classification | `llmHelper.js` | What is this about, how much business impact, did they ask for a manager? | Yes |
+| 2. Tone | `aggravation.js` | How badly is this relationship going? | No |
+| 3. Routing | `escalation.js` | Does a supervisor need to see this, and why? | No |
+| 4. Wording | `templates.js` | What should the agent actually do next? | No |
+
+Layers 2–4 are pure functions of the layers above them — layer 3 never even sees the raw message text — which is what makes them testable as inputs in, enums out.
 
 ## Problem Statement
 
@@ -151,8 +172,12 @@ Support teams waste time manually reading and triaging customer messages. This t
      returns all three, validated against fixed allow-lists
    - **Fallbacks** (Rule-based): A deterministic keyword scorer for urgency and a keyword check
      for supervisor requests, used only when the LLM is unavailable or returns unusable values
-   - **Recommendation** (Template-based): Maps category, urgency and the supervisor flag to a
-     recommended action, escalating where warranted
+   - **Aggravation** (Rule-based, no LLM): Reports whether the customer is upset and which
+     signals said so, kept out of the LLM call so tone cannot contaminate the impact judgment
+   - **Escalation** (Pure): Combines urgency, aggravation and the supervisor flag into
+     `{escalate, reason}` from an allow-listed enum
+   - **Recommendation** (Template-based): Turns the escalation reason and category into a
+     recommended action
 4. **Display Results**: Shows category, urgency tag (marked AI-scored or rule-scored), the
    respond-by target, recommended action, and the reasoning behind it
 5. **Draft Reply** (optional): Write the reply you plan to send and have it reviewed for
@@ -194,6 +219,65 @@ Can I upgrade my subscription to the pro plan?
 ```
 The dashboard won't load when I try to access it. I've tried refreshing but it keeps timing out.
 ```
+
+### Examples for the behaviour added in this fork
+
+These are the pairs that show *why* tone, impact and routing are separate. Each has been
+verified against the live API.
+
+**A polite, low-impact supervisor request — escalates anyway**
+```
+Hi, thanks for your help so far. Could I speak with a supervisor about this please?
+```
+→ General Inquiry / **Low** urgency / not aggravated / **escalates** with reason
+`customer_requested`. Urgency alone would have left this in the normal queue.
+
+**A furious customer with a cosmetic bug — does not escalate**
+```
+THIS IS RIDICULOUS!!! The footer still shows the wrong year and it looks unprofessional
+```
+→ Technical Problem / **Medium** / **aggravated** (`frustrated_wording`,
+`excessive_punctuation`) / **no escalation**. Being upset does not jump the queue.
+
+**A calm outage — escalates on impact alone**
+```
+Our production server is down and we cannot process orders
+```
+→ Technical Problem / **High** / not aggravated / **escalates** with reason `high_urgency`.
+The polite customer whose business has stopped is not deprioritised.
+
+**Both at once — the reason changes the advice**
+```
+This is the third time I am reporting this. Still no reply. The site is down AGAIN and it is unacceptable.
+```
+→ **High** + **aggravated** (`frustrated_wording`, `repeat_contact`) → reason
+`high_urgency_and_aggravated`, and the recommended action adds *"The customer is already
+upset, so acknowledge that first."*
+
+**Emphatic, not angry**
+```
+THANKS SO MUCH!!! You fixed it so fast
+```
+→ tone signals `shouting` and `excessive_punctuation` are **reported but not decisive**, so
+`aggravated` stays false. A flag that fires on exclamation marks would mean nothing.
+
+**To see the draft reply review**, analyze any of the above, then put a deliberately bad
+reply in the Draft Reply box, e.g.:
+```
+I have already refunded you in full and upgraded your account to free for life.
+```
+→ **Do not send**, flagged for inventing a refund and an upgrade that were never authorised.
+That draft is friendly and confident, which is exactly why a tone-only check would pass it.
+
+**To see follow-up tracking**, analyze a High-urgency message and wait — its response target
+is 1 hour, and the History tab badge and Dashboard "Needs attention" panel update on their
+own. To see the overdue state immediately, open DevTools and edit the `dueBy` field of a
+record in `localStorage` under the `triageHistory` key to a time in the past.
+
+**To see the honest-failure behaviour**, break `VITE_GROQ_API_KEY` in `.env`, restart the dev
+server, and analyze anything: you get an amber banner, a *rule-scored* urgency badge,
+"Rule-Based Reasoning" instead of "AI Reasoning", and reply review reports itself
+unavailable rather than inventing a verdict.
 
 ## Security Note
 
