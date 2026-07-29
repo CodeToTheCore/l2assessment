@@ -18,9 +18,29 @@ Short version:
 - **Recommendations use category *and* urgency**, and each category has its own action.
 - **Guarded storage layer, 22 unit tests, `.env` added to `.gitignore`.**
 
+### What wasn't working before
+
+| Area | Before | After |
+|---|---|---|
+| **Urgency scoring** | The only rule that *raised* the score was the count of `!`. ALL-CAPS subtracted 50, short messages up to 100 (two stacking branches), politeness and `?` subtracted, and the score changed with the time of day and day of week — so the same message got a different urgency depending on when you clicked, and history was not reproducible. `High` needed `> 80` but one `!` landed on exactly 80. "Our production server is down" scored **Low**; agreement with my own labels was **3/12**. | The LLM scores urgency from business impact in the same call as the category, with tone explicitly excluded. **8/8** on held-out messages. The rewritten keyword scorer — real signal tiers, no clock dependency, shouting counted as urgency rather than against it — is now only the fallback. |
+| **Categorization** | The model was asked an open question and its reply *prose* was scanned for keywords in a fixed order, `billing` first, so a reply saying *"this is not a billing issue, it's a bug in the export"* was classified **Billing Issue**. `temperature: 0.7` meant the same message could be labelled differently on consecutive runs. | JSON mode at `temperature: 0`, with the category read from a declared field and validated against an allow-list. Unrecognised values become `Unknown` → *review manually* instead of a confident guess. **6/6** on the examples below. |
+| **Recommended actions** | `Feature Request` returned *"Ask user to check billing portal."* — a copy-paste of the billing entry. `getRecommendedAction(category, urgency)` accepted `urgency` and never used it, so a High-urgency outage and a Low-urgency question got identical advice. | Every category has its own action, and urgency drives a response-time line and escalation. |
+| **AI failures** | Any API error fell through to canned keyword output with only a `console.warn`, while the UI kept the heading "AI Reasoning". The bundled API key was **expired**, so this was the app's permanent state and nothing said so. Fallback wording was picked with `Math.random()`, so re-analysing one message gave different explanations. | Amber banner when the fallback ran, urgency badge marked *AI-scored* or *rule-scored*, "Rule-based" chip in history. No key means no request is attempted. Fallback wording is a stable hash of the message. |
+| **Stored history** | Four unguarded `JSON.parse` calls — one malformed value blanked the page. No record ids, unbounded growth with no quota handling, and the list was sorted **alphabetically by message text** instead of newest-first. | One guarded storage module: corrupt entries filtered out, capped at 200 records, stable ids, newest-first, failed writes reported to the user. |
+| **Navigation** | `window.location.href` and a raw `<a href>` forced full page reloads inside the single-page app; two `setState`-in-effect patterns caused cascading renders (both were lint errors). | `useNavigate` / `Link`, with state derived during render. Lint is clean (was 6 errors). |
+| **Secrets** | `.env` was **not** in `.gitignore` — it sat untracked next to a live API key, one `git add -A` from being published. | Ignored, with an `!.env.example` exception. Verified it was never committed, so there is nothing in git history to scrub. |
+| **Tests** | None, so none of the above had anything to catch it. | 22 unit tests (`npm test`, no new dependencies), written as regressions against these specific bugs. |
+
+Two findings came from measurement rather than reading the code, and both are written up
+in [IMPROVEMENTS.md](IMPROVEMENTS.md): a rewritten keyword scorer that hit **12/12** on
+the messages I tuned it against and **2/8** on held-out messages (which is why urgency
+moved to the LLM), and an escalation rule of my own that passed its unit tests and then
+turned *"Can I upgrade to the pro plan?"* into *"Escalate to a senior agent within 1
+hour"* against the live API.
+
 ## Overview
 
-The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to categorize messages, applies rule-based urgency scoring, and suggests next steps based on predefined templates.
+The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to assign both a category and an urgency level in a single structured call, falls back to rule-based urgency scoring when the API is unavailable, and suggests next steps from templates keyed on both values.
 
 ## Problem Statement
 
@@ -36,7 +56,7 @@ Support teams waste time manually reading and triaging customer messages. This t
 
 ### Prerequisites
 
-- Node.js (v16 or higher)
+- Node.js (v20 or higher — `npm test` uses the built-in `node --test` runner)
 - npm or yarn
 - Groq API key (FREE - get from https://console.groq.com)
 
@@ -99,7 +119,8 @@ Support teams waste time manually reading and triaging customer messages. This t
      action, escalating where warranted
 4. **Display Results**: Shows category, urgency tag (marked AI-scored or rule-scored),
    recommended action, and the reasoning behind it
-5. **History**: All analyses are saved to localStorage and viewable in the History tab
+5. **History**: Analyses are saved to localStorage (newest first, capped at 200 records)
+   and viewable in the History tab
 
 
 ## Example Test Messages
