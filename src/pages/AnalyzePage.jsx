@@ -228,7 +228,7 @@ function AnalyzePage() {
 
             {results.supervisorRequested && (
               <div className="mb-4 bg-red-50 border-2 border-red-300 text-red-900 rounded-lg p-4">
-                <div className="font-bold mb-1">🚩 Supervisor requested</div>
+                <div className="font-bold mb-1">⚠️ Supervisor requested</div>
                 <p className="text-sm">
                   This customer asked to be handled by a supervisor. Hand it to one, and
                   have the reply reviewed below before it is sent.

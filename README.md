@@ -84,6 +84,44 @@ All four are written up in [IMPROVEMENTS.md](IMPROVEMENTS.md):
   not proof; a real stability claim needs the evaluation harness in section 5. This is part of
   why allow-list validation matters: it bounds what a drifting reply can turn into.
 
+## Screenshots
+
+All captured from the running app against the live Groq API.
+
+**Draft reply review catching an invented promise** — the full pipeline in one view. The
+message is triaged Billing Issue / High, escalated with the reason *"High urgency, and the
+customer is upset"* (tone signal: repeat contact), and the drafted reply is stopped with
+**Do not send** because it *"invents a fact (refund and account upgrade) that was not stated
+or confirmed"*. That draft reads as friendly and confident, which is exactly why a
+tone-only check would have let it through.
+
+![Draft reply review returning Do not send](docs/screenshots/reply-review.png)
+
+**A polite, Low-urgency message that escalates anyway** — the case that justifies keeping
+the supervisor flag separate from urgency. Urgency is **Low** and no tone signals fire, but
+the escalation row reads *"Escalate · The customer asked for a supervisor"*, and the reply is
+flagged for review. Urgency alone would have left this in the normal queue.
+
+![Analysis of a polite supervisor request showing Low urgency but escalation](docs/screenshots/analyze-supervisor-request.png)
+
+**A calm outage escalating on impact alone** — Technical Problem / High with no tone signals,
+escalated for `high_urgency`. This is the message the original app scored **Low**.
+
+![Analysis of a production outage showing High urgency](docs/screenshots/analyze-high-urgency.png)
+
+**The triage queue** — newest first, with the follow-up state on every row: overdue (red, with
+a left border), due soon, open with time remaining, and done. Note the `1 overdue` badge on the
+History tab, the *Needs attention* filter, and the per-row signals — *Upset customer*,
+*Supervisor requested*, *Reply reviewed: Do not send*, and *Rule-based* for a result the model
+did not produce.
+
+![History showing follow-up states and signal chips](docs/screenshots/history.png)
+
+**The dashboard** — the *Needs attention* panel surfaces overdue and due-soon follow-ups plus
+open supervisor requests, above the category and urgency breakdowns.
+
+![Dashboard showing the needs-attention panel](docs/screenshots/dashboard.png)
+
 ## Overview
 
 The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to assign a category, an urgency level and a supervisor-requested flag in a single structured call, measures customer aggravation separately with rules, and combines the two into an escalation decision and a recommended next step. When the API is unavailable it falls back to rule-based scoring and says so rather than presenting the result as AI output.

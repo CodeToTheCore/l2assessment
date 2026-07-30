@@ -127,7 +127,7 @@ function DashboardPage() {
                       </div>
                       <div className="text-xs text-gray-500">
                         {item.category} · {item.urgency} urgency
-                        {item.supervisorRequested && ' · 🚩 supervisor requested'}
+                        {item.supervisorRequested && ' · ⚠️ supervisor requested'}
                       </div>
                     </div>
                     <span className={`ml-3 text-xs px-3 py-1 rounded-full font-semibold whitespace-nowrap ${

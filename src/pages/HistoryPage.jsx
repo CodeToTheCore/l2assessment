@@ -184,7 +184,7 @@ function HistoryPage() {
                       </span>
                       {item.supervisorRequested && (
                         <span className="text-xs bg-red-100 text-red-900 px-3 py-1 rounded-full font-semibold">
-                          🚩 Supervisor requested
+                          ⚠️ Supervisor requested
                         </span>
                       )}
                       {item.aggravated && (
