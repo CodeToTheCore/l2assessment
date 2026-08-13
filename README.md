@@ -143,9 +143,21 @@ Support teams waste time manually reading and triaging customer messages. This t
 
 ## Tech Stack
 
-- **Frontend**: React + Vite + Tailwind CSS
-- **AI**: Groq API (Llama 3.3 70B - Free tier)
-- **Runtime**: Browser-based (local development only)
+- **Language:** JavaScript (ES modules) + JSX — no build-time type checking
+- **Frontend:** React 19, Vite 7, Tailwind CSS 3, React Router 7
+- **AI / LLM:** Groq API — Llama 3.3 70B (`llama-3.3-70b-versatile`) via `groq-sdk`, called in
+  JSON mode at `temperature: 0`. Used for classification (category, urgency, supervisor flag)
+  and for reviewing draft replies.
+- **Rule-based layers (no LLM):** `urgencyScorer.js` as the urgency fallback,
+  `aggravation.js` for tone, `escalation.js` for routing — all pure functions
+- **Persistence:** browser `localStorage` through one guarded module, capped at 200 records
+- **Testing:** Node's built-in runner (`node --test`) — 76 unit tests, zero extra
+  dependencies. Golden, adversarial and regression checks were additionally run against the
+  live API.
+- **Linting:** ESLint 9 with the React Hooks and React Refresh plugins
+- **Version control:** Git / GitHub
+- **Runtime:** browser-based, local development only — the API key is currently exposed
+  client-side, so this is not deployable as-is (see [Security Note](#security-note))
 
 ## Setup Instructions
 
