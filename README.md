@@ -25,7 +25,8 @@ Short version:
 - **Tone, impact and routing are separate layers** — `aggravation.js` measures how upset the
   customer is, `escalation.js` decides routing from an allow-listed reason enum, and neither
   touches the LLM. Being upset does not jump the queue; being blocked does.
-- **Guarded storage layer, 76 unit tests, `.env` added to `.gitignore`.**
+- **Guarded storage layer, 84 unit tests, `.env` added to `.gitignore`.**
+- **The Groq key never reaches the browser.** AI calls go through a small server function (`/api/llm`) that holds the key and adds the prompts, with input limits and a per-visitor rate limit.
 
 ### What wasn't working before
 
@@ -37,7 +38,7 @@ Short version:
 | **AI failures** | Any API error fell through to canned keyword output with only a `console.warn`, while the UI kept the heading "AI Reasoning". The bundled API key was **expired**, so this was the app's permanent state and nothing said so. Fallback wording was picked with `Math.random()`, so re-analysing one message gave different explanations. | Amber banner when the fallback ran, urgency badge marked *AI-scored* or *rule-scored*, "Rule-based" chip in history. No key means no request is attempted. Fallback wording is a stable hash of the message. |
 | **Stored history** | Four unguarded `JSON.parse` calls — one malformed value blanked the page. No record ids, unbounded growth with no quota handling, and the list was sorted **alphabetically by message text** instead of newest-first. | One guarded storage module: corrupt entries filtered out, capped at 200 records, stable ids, newest-first, failed writes reported to the user. |
 | **Navigation** | `window.location.href` and a raw `<a href>` forced full page reloads inside the single-page app; two `setState`-in-effect patterns caused cascading renders (both were lint errors). | `useNavigate` / `Link`, with state derived during render. Lint is clean (was 6 errors). |
-| **Secrets** | `.env` was **not** in `.gitignore` — it sat untracked next to a live API key, one `git add -A` from being published. | Ignored, with an `!.env.example` exception. Verified it was never committed, so there is nothing in git history to scrub. |
+| **Secrets** | `.env` was **not** in `.gitignore`, so it sat untracked next to a live API key, one `git add -A` from being published. The key was also a `VITE_` variable, which Vite builds into the public JavaScript: any visitor to a deployed copy could have copied it. | Ignored, with an `!.env.example` exception, and verified it was never committed. The key is now `GROQ_API_KEY`, read only by a server function (`/api/llm`); the browser sends message text and gets results back. The prompts live on the server too, so the endpoint can't be repurposed as a free chatbot. |
 | **Tests** | None, so none of the above had anything to catch it. | 76 unit tests (`npm test`, no new dependencies), written as regressions against these specific bugs. |
 
 ### Added beyond the original scope
@@ -189,7 +190,7 @@ Support teams waste time manually reading and triaging customer messages. This t
    
    Edit `.env.local` and add your Groq API key:
    ```
-   VITE_GROQ_API_KEY=gsk_your-actual-key-here
+   GROQ_API_KEY=gsk_your-actual-key-here
    ```
    
    Get your FREE API key from: https://console.groq.com/keys
@@ -205,12 +206,12 @@ Support teams waste time manually reading and triaging customer messages. This t
 
 5. **Run the checks** (optional)
    ```bash
-   npm test        # 76 unit tests, no extra dependencies (node --test)
+   npm test        # 84 unit tests, no extra dependencies (node --test)
    npm run lint
    npm run build
    ```
 
-> **Note:** if `VITE_GROQ_API_KEY` is missing or invalid, the app still works — it falls
+> **Note:** if `GROQ_API_KEY` is missing or invalid, the app still works — it falls
 > back to rule-based triage and labels the results as rule-scored rather than AI-scored.
 
 ## How It Works
@@ -324,7 +325,7 @@ is 1 hour, and the History tab badge and Dashboard "Needs attention" panel updat
 own. To see the overdue state immediately, open DevTools and edit the `dueBy` field of a
 record in `localStorage` under the `triageHistory` key to a time in the past.
 
-**To see the honest-failure behaviour**, break `VITE_GROQ_API_KEY` in `.env`, restart the dev
+**To see the honest-failure behaviour**, break `GROQ_API_KEY` in `.env.local`, restart the dev
 server, and analyze anything: you get an amber banner, a *rule-scored* urgency badge,
 "Rule-Based Reasoning" instead of "AI Reasoning", and reply review reports itself
 unavailable rather than inventing a verdict.

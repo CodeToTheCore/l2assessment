@@ -222,7 +222,7 @@ function AnalyzePage() {
             {results.source === 'fallback' && (
               <div className="mb-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 text-sm">
                 The AI service was unavailable, so this was categorized by the built-in
-                rules instead. Check that <code>VITE_GROQ_API_KEY</code> is set.
+                rules instead. Check that <code>GROQ_API_KEY</code> is set on the server.
               </div>
             )}
 

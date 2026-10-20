@@ -36,10 +36,10 @@ Once logged in:
 3. Add your key:
 
 ```
-VITE_GROQ_API_KEY=gsk_your-actual-key-here
+GROQ_API_KEY=gsk_your-actual-key-here
 ```
 
-4. Save the file
+4. Save the file. (No `VITE_` prefix: the key stays on the server and is never sent to the browser.)
 5. Restart the dev server:
 
 ```bash
@@ -117,3 +117,8 @@ This is more than enough for development and testing!
 ---
 
 **Happy Triaging! 🚀**
+
+## Deploying (Vercel)
+
+Add the key in the Vercel project under **Settings → Environment Variables** as `GROQ_API_KEY`.
+The `/api/llm` function reads it there. It is never in the code or the browser.
