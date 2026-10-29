@@ -9,7 +9,8 @@ import { SYSTEM_PROMPT, REVIEW_PROMPT, buildReviewInput } from '../src/utils/pro
  * instructions and use this endpoint as a free general-purpose chatbot.
  */
 
-const MODEL = 'llama-3.3-70b-versatile';
+// Groq retired llama-3.3-70b-versatile for free accounts on Aug 16, 2026; this is its recommended replacement.
+const MODEL = 'openai/gpt-oss-120b';
 export const MAX_TEXT_LENGTH = 4000;
 
 const tooLong = (value) => typeof value === 'string' && value.length > MAX_TEXT_LENGTH;
@@ -50,7 +51,9 @@ export async function handleLlmRequest(body, { apiKey, client } = {}) {
       messages,
       // Classification and review should be repeatable, so no sampling randomness.
       temperature: 0,
-      max_tokens: mode === 'triage' ? 300 : 700,
+      // gpt-oss thinks before answering and that counts toward max_tokens, so keep the thinking short and leave room.
+      reasoning_effort: 'low',
+      max_tokens: mode === 'triage' ? 1200 : 2000,
       response_format: { type: 'json_object' },
     });
     const content = response.choices?.[0]?.message?.content;

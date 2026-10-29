@@ -146,7 +146,7 @@ Support teams waste time manually reading and triaging customer messages. This t
 
 - **Language:** JavaScript (ES modules) + JSX — no build-time type checking
 - **Frontend:** React 19, Vite 7, Tailwind CSS 3, React Router 7
-- **AI / LLM:** Groq API — Llama 3.3 70B (`llama-3.3-70b-versatile`) via `groq-sdk`, called in
+- **AI / LLM:** Groq API — GPT-OSS 120B (`openai/gpt-oss-120b`) via `groq-sdk`, called in
   JSON mode at `temperature: 0`. Used for classification (category, urgency, supervisor flag)
   and for reviewing draft replies.
 - **Rule-based layers (no LLM):** `urgencyScorer.js` as the urgency fallback,
